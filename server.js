@@ -98,7 +98,11 @@ function guardarDatos() {
   try {
     fs.writeFileSync(
       DATA_FILE,
-      JSON.stringify({ devices, pagosCreados, pagosGame, configGlobal, configGame }, null, 2)
+      JSON.stringify(
+        { devices, pagosCreados, pagosGame, configGlobal, configGame },
+        null,
+        2
+      )
     );
   } catch (err) {
     console.error("Error guardando datos:", err.message);
@@ -151,43 +155,21 @@ function asegurarDevice(deviceId) {
     };
   }
 
-  if (!devices[deviceId].tipo) {
-    devices[deviceId].tipo = detectarTipoDevice(deviceId);
+  const d = devices[deviceId];
+
+  if (!d.tipo) d.tipo = detectarTipoDevice(deviceId);
+  if (typeof d.activo === "undefined") d.activo = true;
+  if (typeof d.online === "undefined") d.online = false;
+  if (typeof d.ownerLinked === "undefined") d.ownerLinked = false;
+  if (typeof d.ownerAccessToken === "undefined") d.ownerAccessToken = null;
+  if (typeof d.ownerRefreshToken === "undefined") d.ownerRefreshToken = null;
+  if (typeof d.ownerUserId === "undefined") d.ownerUserId = null;
+  if (typeof d.ownerEmail === "undefined") d.ownerEmail = "";
+  if (typeof d.comisionEvetecPorcentaje === "undefined") {
+    d.comisionEvetecPorcentaje = COMISION_EVETEC_PORCENTAJE;
   }
 
-  if (typeof devices[deviceId].activo === "undefined") {
-    devices[deviceId].activo = true;
-  }
-
-  if (typeof devices[deviceId].online === "undefined") {
-    devices[deviceId].online = false;
-  }
-
-  if (typeof devices[deviceId].ownerLinked === "undefined") {
-    devices[deviceId].ownerLinked = false;
-  }
-
-  if (typeof devices[deviceId].ownerAccessToken === "undefined") {
-    devices[deviceId].ownerAccessToken = null;
-  }
-
-  if (typeof devices[deviceId].ownerRefreshToken === "undefined") {
-    devices[deviceId].ownerRefreshToken = null;
-  }
-
-  if (typeof devices[deviceId].ownerUserId === "undefined") {
-    devices[deviceId].ownerUserId = null;
-  }
-
-  if (typeof devices[deviceId].ownerEmail === "undefined") {
-    devices[deviceId].ownerEmail = "";
-  }
-
-  if (typeof devices[deviceId].comisionEvetecPorcentaje === "undefined") {
-    devices[deviceId].comisionEvetecPorcentaje = COMISION_EVETEC_PORCENTAJE;
-  }
-
-  return devices[deviceId];
+  return d;
 }
 
 function escaparHtml(v) {
@@ -211,7 +193,7 @@ function calcularComision(deviceId, monto) {
 function normalizarPedidoPago(body) {
   const device_id = String(body.device_id || body.deviceId || "ASPIRADORA_001");
   const monto = Number(body.monto || body.amount || body.precio);
-  const segundos = Number(body.segundos || body.seconds || body.creditos || 0);
+  const segundos = Number(body.segundos || body.seconds || 0);
 
   return { device_id, monto, segundos };
 }
@@ -303,7 +285,6 @@ app.get("/game/config/:deviceId", (req, res) => {
     comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
   });
 });
-
 // =====================================================
 // OAUTH MERCADO PAGO
 // =====================================================
@@ -613,6 +594,7 @@ app.post("/crear-pago", async (req, res) => {
 // =====================================================
 // MERCADO PAGO - CREAR PAGO JUEGO GALAGA
 // =====================================================
+
 async function crearPagoGameMercadoPago({ device_id, monto, creditos }) {
   const d = asegurarDevice(device_id);
   d.tipo = "game";
@@ -751,7 +733,6 @@ app.post("/game/crear-pago", async (req, res) => {
     });
   }
 });
-
 // =====================================================
 // MERCADO PAGO - ESTADO DEL PAGO ASPIRADORA
 // =====================================================
@@ -913,6 +894,433 @@ app.get("/game/estado/:paymentId", async (req, res) => {
     });
   }
 });
+
+// =====================================================
+// PANEL ADMIN
+// =====================================================
+
+app.get("/", (req, res) => {
+  res.redirect("/admin");
+});
+
+app.get("/admin", (req, res) => {
+  let html = `
+  <!doctype html>
+  <html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>EVETEC Admin</title>
+    <style>
+      body { font-family: Arial; background:#050816; color:white; padding:20px; }
+      h1 { color:#22d3ee; margin-bottom:4px; }
+      h2 { color:#facc15; }
+      h3 { color:#67e8f9; }
+      .box { background:#111827; border:1px solid #22d3ee; border-radius:14px; padding:16px; margin-bottom:20px; }
+      input, select { padding:8px; margin:4px; border-radius:8px; border:0; }
+      button { padding:10px 14px; border:0; border-radius:10px; font-weight:bold; cursor:pointer; margin:4px; }
+      .save { background:#22c55e; color:#001b08; }
+      .danger { background:#ef4444; color:white; }
+      .promo { background:#facc15; color:#111; }
+      .game { background:#8b5cf6; color:white; }
+      .online { color:#22c55e; font-weight:bold; }
+      .offline { color:#ef4444; font-weight:bold; }
+      .small { color:#94a3b8; font-size:13px; }
+      .tag { display:inline-block; background:#0f172a; color:#67e8f9; border:1px solid #155e75; border-radius:999px; padding:4px 10px; font-size:12px; }
+      .ok { color:#22c55e; font-weight:bold; }
+      .bad { color:#ef4444; font-weight:bold; }
+      table { width:100%; border-collapse: collapse; }
+      td, th { border-bottom:1px solid #1f2937; padding:8px; text-align:left; vertical-align:middle; }
+      .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:14px; }
+    </style>
+  </head>
+  <body>
+    <h1>EVETEC PANEL MAESTRO</h1>
+    <p class="small">Base pública: ${escaparHtml(PUBLIC_BASE_URL)}</p>
+    <p class="small">Redirect OAuth: ${escaparHtml(REDIRECT_URI)}</p>
+    <p class="small">
+      MP_CLIENT_ID: <b class="${MP_CLIENT_ID ? "ok" : "bad"}">${MP_CLIENT_ID ? "OK" : "FALTA"}</b> |
+      MP_CLIENT_SECRET: <b class="${MP_CLIENT_SECRET ? "ok" : "bad"}">${MP_CLIENT_SECRET ? "OK" : "FALTA"}</b> |
+      Token fallback EVETEC: <b class="${EVETEC_MP_TOKEN ? "ok" : "bad"}">${EVETEC_MP_TOKEN ? "OK" : "FALTA"}</b>
+    </p>
+
+    <div class="grid">
+      <div class="box">
+        <h2>Estado general aspiradoras</h2>
+        <form method="POST" action="/admin/global/update">
+          Sistema activo:
+          <input type="checkbox" name="activo" ${configGlobal.activo ? "checked" : ""}><br>
+
+          Mensaje global activo:
+          <input type="checkbox" name="mensajeGlobalActivo" ${configGlobal.mensajeGlobalActivo ? "checked" : ""}><br>
+
+          Mensaje global:<br>
+          <input name="mensajeGlobal" value="${escaparHtml(configGlobal.mensajeGlobal)}" size="45"><br>
+
+          <button class="save" type="submit">Guardar estado general</button>
+        </form>
+      </div>
+
+      <div class="box">
+        <h2>Estado GALAGA ARCADE</h2>
+        <form method="POST" action="/admin/game/global/update">
+          Juego activo:
+          <input type="checkbox" name="activo" ${configGame.activo ? "checked" : ""}><br>
+
+          Mensaje:<br>
+          <input name="mensaje" value="${escaparHtml(configGame.mensaje)}" size="45"><br>
+
+          <button class="game" type="submit">Guardar estado juego</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="box">
+      <h2>Precios globales para todas las aspiradoras</h2>
+      <form method="POST" action="/admin/prices/update">
+  `;
+
+  configGlobal.planes.forEach((p, i) => {
+    html += `
+      <div>
+        Nombre:
+        <input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="10">
+        Seg:
+        <input name="segundos${i}" value="${p.segundos}" size="6">
+        Precio:
+        <input name="monto${i}" value="${p.monto}" size="6">
+        Desc:
+        <input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="24">
+      </div>
+    `;
+  });
+
+  html += `
+        <button class="save" type="submit">Guardar precios aspiradoras</button>
+      </form>
+
+      <h3>Aplicar descuento global aspiradoras</h3>
+      <form method="POST" action="/admin/discount">
+        <button class="promo" name="descuento" value="50">50% OFF</button>
+        <button class="promo" name="descuento" value="40">40% OFF</button>
+        <button class="promo" name="descuento" value="30">30% OFF</button>
+        <button class="promo" name="descuento" value="20">20% OFF</button>
+        <button class="promo" name="descuento" value="10">10% OFF</button>
+        <button class="promo" name="descuento" value="5">5% OFF</button>
+      </form>
+
+      <form method="POST" action="/admin/reset-prices">
+        <button class="danger" type="submit">Restaurar precios base aspiradoras</button>
+      </form>
+    </div>
+
+    <div class="box">
+      <h2>Precios GALAGA ARCADE</h2>
+      <form method="POST" action="/admin/game/prices/update">
+  `;
+
+  configGame.precios.forEach((p, i) => {
+    html += `
+      <div>
+        Nombre:
+        <input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="12">
+        Créditos:
+        <input name="creditos${i}" value="${p.creditos}" size="6">
+        Precio:
+        <input name="monto${i}" value="${p.monto}" size="6">
+        Desc:
+        <input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="24">
+      </div>
+    `;
+  });
+
+  html += `
+        <button class="game" type="submit">Guardar precios GALAGA</button>
+      </form>
+
+      <h3>Aplicar descuento GALAGA</h3>
+      <form method="POST" action="/admin/game/discount">
+        <button class="promo" name="descuento" value="50">50% OFF</button>
+        <button class="promo" name="descuento" value="40">40% OFF</button>
+        <button class="promo" name="descuento" value="30">30% OFF</button>
+        <button class="promo" name="descuento" value="20">20% OFF</button>
+        <button class="promo" name="descuento" value="10">10% OFF</button>
+      </form>
+
+      <form method="POST" action="/admin/game/reset-prices">
+        <button class="danger" type="submit">Restaurar precios base GALAGA</button>
+      </form>
+    </div>
+  html += `
+    <div class="box">
+      <h2>Promo global opcional aspiradoras</h2>
+      <form method="POST" action="/admin/promo/update">
+        Activa:
+        <input type="checkbox" name="activa" ${configGlobal.promoGlobal.activa ? "checked" : ""}><br>
+        Nombre:
+        <input name="nombre" value="${escaparHtml(configGlobal.promoGlobal.nombre)}" size="20"><br>
+        Duración:
+        <input name="segundos" value="${configGlobal.promoGlobal.segundos}" size="8"> segundos<br>
+        Precio:
+        <input name="monto" value="${configGlobal.promoGlobal.monto}" size="8"><br>
+        Descripción:
+        <input name="descripcion" value="${escaparHtml(configGlobal.promoGlobal.descripcion)}" size="50"><br>
+
+        <button class="save" type="submit">Guardar promo aspiradora</button>
+      </form>
+    </div>
+
+    <div class="box">
+      <h2>Máquinas vinculadas</h2>
+      <table>
+        <tr>
+          <th>Equipo</th>
+          <th>Tipo</th>
+          <th>Online</th>
+          <th>Cuenta MP</th>
+          <th>Comisión</th>
+          <th>Última conexión</th>
+          <th>Acciones</th>
+        </tr>
+  `;
+
+  for (const id of Object.keys(devices)) {
+    const d = asegurarDevice(id);
+    const last = d.ultimaConexion ? new Date(d.ultimaConexion).toLocaleString("es-AR") : "Nunca";
+
+    html += `
+      <tr>
+        <td>${escaparHtml(id)}</td>
+        <td><span class="tag">${escaparHtml(d.tipo || detectarTipoDevice(id))}</span></td>
+        <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
+        <td class="${d.ownerLinked ? "ok" : "bad"}">${d.ownerLinked ? "VINCULADA" : "NO VINCULADA"}</td>
+        <td>
+          <form method="POST" action="/admin/device/${encodeURIComponent(id)}/commission">
+            <input name="comision" value="${d.comisionEvetecPorcentaje}" size="4"> %
+            <button class="save" type="submit">OK</button>
+          </form>
+        </td>
+        <td>${escaparHtml(last)}</td>
+        <td>
+          <form method="POST" action="/unlink-owner/${encodeURIComponent(id)}">
+            <button class="danger" type="submit">Desvincular MP</button>
+          </form>
+        </td>
+      </tr>
+    `;
+  }
+
+  html += `
+      </table>
+    </div>
+
+    <div class="box">
+      <h2>Últimos pagos aspiradoras</h2>
+      <table>
+        <tr>
+          <th>Referencia</th>
+          <th>Equipo</th>
+          <th>Monto</th>
+          <th>Segundos</th>
+          <th>Comisión EVETEC</th>
+          <th>Estado</th>
+          <th>Fecha</th>
+        </tr>
+  `;
+
+  const pagosAspiradora = Object.values(pagosCreados)
+    .filter((p, index, arr) => arr.findIndex(x => x.external_reference === p.external_reference) === index)
+    .slice(-20)
+    .reverse();
+
+  for (const p of pagosAspiradora) {
+    html += `
+      <tr>
+        <td>${escaparHtml(p.external_reference)}</td>
+        <td>${escaparHtml(p.device_id)}</td>
+        <td>$${p.monto}</td>
+        <td>${p.segundos || 0}s</td>
+        <td>$${p.comisionEvetec || 0}</td>
+        <td>${escaparHtml(p.estado)}</td>
+        <td>${escaparHtml(p.creado ? new Date(p.creado).toLocaleString("es-AR") : "")}</td>
+      </tr>
+    `;
+  }
+
+  html += `
+      </table>
+    </div>
+
+    <div class="box">
+      <h2>Últimos pagos GALAGA ARCADE</h2>
+      <table>
+        <tr>
+          <th>Referencia</th>
+          <th>Equipo</th>
+          <th>Monto</th>
+          <th>Créditos</th>
+          <th>Comisión EVETEC</th>
+          <th>Estado</th>
+          <th>Fecha</th>
+        </tr>
+  `;
+
+  const pagosGalaga = Object.values(pagosGame)
+    .filter((p, index, arr) => arr.findIndex(x => x.external_reference === p.external_reference) === index)
+    .slice(-20)
+    .reverse();
+
+  for (const p of pagosGalaga) {
+    html += `
+      <tr>
+        <td>${escaparHtml(p.external_reference)}</td>
+        <td>${escaparHtml(p.device_id)}</td>
+        <td>$${p.monto}</td>
+        <td>${p.creditos || 0}</td>
+        <td>$${p.comisionEvetec || 0}</td>
+        <td>${escaparHtml(p.estado)}</td>
+        <td>${escaparHtml(p.creado ? new Date(p.creado).toLocaleString("es-AR") : "")}</td>
+      </tr>
+    `;
+  }
+
+  html += `
+    </table>
+    </div>
+
+  </body>
+  </html>
+  `;
+
+  res.send(html);
+});
+
+// =====================================================
+// ACCIONES ADMIN ASPIRADORAS
+// =====================================================
+
+app.post("/admin/global/update", (req, res) => {
+  configGlobal.activo = req.body.activo === "on";
+  configGlobal.mensajeGlobalActivo = req.body.mensajeGlobalActivo === "on";
+  configGlobal.mensajeGlobal = req.body.mensajeGlobal || "";
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/prices/update", (req, res) => {
+  configGlobal.planes.forEach((p, i) => {
+    p.nombre = req.body[`nombre${i}`] || p.nombre;
+    p.segundos = Number(req.body[`segundos${i}`]) || p.segundos;
+    p.monto = Number(req.body[`monto${i}`]) || p.monto;
+    p.montoBase = p.montoBase || p.monto;
+    p.descripcion = req.body[`descripcion${i}`] || p.descripcion;
+  });
+
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/discount", (req, res) => {
+  const descuento = Number(req.body.descuento) || 0;
+
+  configGlobal.planes = configGlobal.planes.map(p => ({
+    ...p,
+    montoBase: p.montoBase || p.monto,
+    monto: aplicarDescuento(p.montoBase || p.monto, descuento)
+  }));
+
+  configGlobal.mensajeGlobalActivo = true;
+  configGlobal.mensajeGlobal = `Promoción global aplicada: ${descuento}% OFF`;
+
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/reset-prices", (req, res) => {
+  configGlobal.planes = configGlobal.planes.map(p => ({
+    ...p,
+    monto: p.montoBase || p.monto
+  }));
+
+  configGlobal.mensajeGlobalActivo = true;
+  configGlobal.mensajeGlobal = "Precios normales restaurados";
+
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/promo/update", (req, res) => {
+  configGlobal.promoGlobal.activa = req.body.activa === "on";
+  configGlobal.promoGlobal.nombre = req.body.nombre || configGlobal.promoGlobal.nombre;
+  configGlobal.promoGlobal.segundos = Number(req.body.segundos) || configGlobal.promoGlobal.segundos;
+  configGlobal.promoGlobal.monto = Number(req.body.monto) || configGlobal.promoGlobal.monto;
+  configGlobal.promoGlobal.descripcion = req.body.descripcion || configGlobal.promoGlobal.descripcion;
+
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+// =====================================================
+// ACCIONES ADMIN GALAGA
+// =====================================================
+
+app.post("/admin/game/global/update", (req, res) => {
+  configGame.activo = req.body.activo === "on";
+  configGame.mensaje = req.body.mensaje || "";
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/game/prices/update", (req, res) => {
+  configGame.precios.forEach((p, i) => {
+    p.nombre = req.body[`nombre${i}`] || p.nombre;
+    p.creditos = Number(req.body[`creditos${i}`]) || p.creditos;
+    p.monto = Number(req.body[`monto${i}`]) || p.monto;
+    p.montoBase = p.montoBase || p.monto;
+    p.descripcion = req.body[`descripcion${i}`] || p.descripcion;
+  });
+
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/game/discount", (req, res) => {
+  const descuento = Number(req.body.descuento) || 0;
+
+  configGame.precios = configGame.precios.map(p => ({
+    ...p,
+    montoBase: p.montoBase || p.monto,
+    monto: aplicarDescuento(p.montoBase || p.monto, descuento)
+  }));
+
+  configGame.mensaje = `Promoción GALAGA aplicada: ${descuento}% OFF`;
+
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/game/reset-prices", (req, res) => {
+  configGame.precios = configGame.precios.map(p => ({
+    ...p,
+    monto: p.montoBase || p.monto
+  }));
+
+  configGame.mensaje = "Precios GALAGA restaurados";
+
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+// =====================================================
+// ACCIONES ADMIN DISPOSITIVOS
+// =====================================================
+
+app.post("/admin/device/:deviceId/commission", (req, res) => {
+  const d = asegurarDevice(req.params.deviceId);
+  d.comisionEvetecPorcentaje = Number(req.body.comision) || d.comisionEvetecPorcentaje;
+  guardarDatos();
+  res.redirect("/admin");
+});
+
 // =====================================================
 // STATUS / HEALTH
 // =====================================================
@@ -920,8 +1328,17 @@ app.get("/game/estado/:paymentId", async (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    server: "EVETEC_FULL_SYSTEM",
-    devices
+    server: "EVETEC_FULL_SYSTEM_ADMIN_GALAGA",
+    publicBaseUrl: PUBLIC_BASE_URL,
+    redirectUri: REDIRECT_URI,
+    mpClientId: Boolean(MP_CLIENT_ID),
+    mpClientSecret: Boolean(MP_CLIENT_SECRET),
+    fallbackToken: Boolean(EVETEC_MP_TOKEN),
+    devices,
+    game: {
+      activo: configGame.activo,
+      precios: configGame.precios
+    }
   });
 });
 
@@ -946,14 +1363,17 @@ setInterval(() => {
 }, 5000);
 
 // =====================================================
-// START SERVER
+// START
 // =====================================================
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log("=======================================");
-  console.log(" EVETEC SERVER + GAME + ASPIRADORAS");
+  console.log(" EVETEC SERVER GLOBAL + ADMIN + GALAGA");
   console.log("=======================================");
-  console.log(`Servidor: http://localhost:${PORT}`);
-  console.log(`Public: ${PUBLIC_BASE_URL}`);
+  console.log(`Servidor local: http://localhost:${PORT}`);
+  console.log(`URL pública: ${PUBLIC_BASE_URL}`);
+  console.log(`Redirect URI: ${REDIRECT_URI}`);
+  console.log(`Admin: ${PUBLIC_BASE_URL}/admin`);
+  console.log(`Galaga config: ${PUBLIC_BASE_URL}/game/config/GALAGA_001`);
   console.log("=======================================");
 });
