@@ -916,7 +916,7 @@ app.get("/admin", (req, res) => {
       h2 { color:#facc15; }
       h3 { color:#67e8f9; }
       .box { background:#111827; border:1px solid #22d3ee; border-radius:14px; padding:16px; margin-bottom:20px; }
-      input, select { padding:8px; margin:4px; border-radius:8px; border:0; }
+      input { padding:8px; margin:4px; border-radius:8px; border:0; }
       button { padding:10px 14px; border:0; border-radius:10px; font-weight:bold; cursor:pointer; margin:4px; }
       .save { background:#22c55e; color:#001b08; }
       .danger { background:#ef4444; color:white; }
@@ -930,7 +930,7 @@ app.get("/admin", (req, res) => {
       .bad { color:#ef4444; font-weight:bold; }
       table { width:100%; border-collapse: collapse; }
       td, th { border-bottom:1px solid #1f2937; padding:8px; text-align:left; vertical-align:middle; }
-      .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:14px; }
+      .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:14px; }
     </style>
   </head>
   <body>
@@ -949,13 +949,10 @@ app.get("/admin", (req, res) => {
         <form method="POST" action="/admin/global/update">
           Sistema activo:
           <input type="checkbox" name="activo" ${configGlobal.activo ? "checked" : ""}><br>
-
           Mensaje global activo:
           <input type="checkbox" name="mensajeGlobalActivo" ${configGlobal.mensajeGlobalActivo ? "checked" : ""}><br>
-
           Mensaje global:<br>
           <input name="mensajeGlobal" value="${escaparHtml(configGlobal.mensajeGlobal)}" size="45"><br>
-
           <button class="save" type="submit">Guardar estado general</button>
         </form>
       </div>
@@ -965,32 +962,30 @@ app.get("/admin", (req, res) => {
         <form method="POST" action="/admin/game/global/update">
           Juego activo:
           <input type="checkbox" name="activo" ${configGame.activo ? "checked" : ""}><br>
-
           Mensaje:<br>
           <input name="mensaje" value="${escaparHtml(configGame.mensaje)}" size="45"><br>
-
           <button class="game" type="submit">Guardar estado juego</button>
         </form>
       </div>
     </div>
 
     <div class="box">
-      <h2>Precios globales para todas las aspiradoras</h2>
+      <h2>Precios globales para aspiradoras</h2>
       <form method="POST" action="/admin/prices/update">
   `;
 
   configGlobal.planes.forEach((p, i) => {
     html += `
-      <div>
-        Nombre:
-        <input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="10">
-        Seg:
-        <input name="segundos${i}" value="${p.segundos}" size="6">
-        Precio:
-        <input name="monto${i}" value="${p.monto}" size="6">
-        Desc:
-        <input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="24">
-      </div>
+        <div>
+          Nombre:
+          <input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="10">
+          Seg:
+          <input name="segundos${i}" value="${p.segundos}" size="6">
+          Precio:
+          <input name="monto${i}" value="${p.monto}" size="6">
+          Desc:
+          <input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="24">
+        </div>
     `;
   });
 
@@ -998,7 +993,7 @@ app.get("/admin", (req, res) => {
         <button class="save" type="submit">Guardar precios aspiradoras</button>
       </form>
 
-      <h3>Aplicar descuento global aspiradoras</h3>
+      <h3>Aplicar descuento aspiradoras</h3>
       <form method="POST" action="/admin/discount">
         <button class="promo" name="descuento" value="50">50% OFF</button>
         <button class="promo" name="descuento" value="40">40% OFF</button>
@@ -1020,16 +1015,16 @@ app.get("/admin", (req, res) => {
 
   configGame.precios.forEach((p, i) => {
     html += `
-      <div>
-        Nombre:
-        <input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="12">
-        Créditos:
-        <input name="creditos${i}" value="${p.creditos}" size="6">
-        Precio:
-        <input name="monto${i}" value="${p.monto}" size="6">
-        Desc:
-        <input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="24">
-      </div>
+        <div>
+          Nombre:
+          <input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="12">
+          Créditos:
+          <input name="creditos${i}" value="${p.creditos}" size="6">
+          Precio:
+          <input name="monto${i}" value="${p.monto}" size="6">
+          Desc:
+          <input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="24">
+        </div>
     `;
   });
 
@@ -1049,10 +1044,8 @@ app.get("/admin", (req, res) => {
       <form method="POST" action="/admin/game/reset-prices">
         <button class="danger" type="submit">Restaurar precios base GALAGA</button>
       </form>
-  </div>
-  `;
+    </div>
 
-  html += `
     <div class="box">
       <h2>Promo global opcional aspiradoras</h2>
       <form method="POST" action="/admin/promo/update">
@@ -1066,7 +1059,6 @@ app.get("/admin", (req, res) => {
         <input name="monto" value="${configGlobal.promoGlobal.monto}" size="8"><br>
         Descripción:
         <input name="descripcion" value="${escaparHtml(configGlobal.promoGlobal.descripcion)}" size="50"><br>
-
         <button class="save" type="submit">Guardar promo aspiradora</button>
       </form>
     </div>
@@ -1090,24 +1082,24 @@ app.get("/admin", (req, res) => {
     const last = d.ultimaConexion ? new Date(d.ultimaConexion).toLocaleString("es-AR") : "Nunca";
 
     html += `
-      <tr>
-        <td>${escaparHtml(id)}</td>
-        <td><span class="tag">${escaparHtml(d.tipo || detectarTipoDevice(id))}</span></td>
-        <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
-        <td class="${d.ownerLinked ? "ok" : "bad"}">${d.ownerLinked ? "VINCULADA" : "NO VINCULADA"}</td>
-        <td>
-          <form method="POST" action="/admin/device/${encodeURIComponent(id)}/commission">
-            <input name="comision" value="${d.comisionEvetecPorcentaje}" size="4"> %
-            <button class="save" type="submit">OK</button>
-          </form>
-        </td>
-        <td>${escaparHtml(last)}</td>
-        <td>
-          <form method="POST" action="/unlink-owner/${encodeURIComponent(id)}">
-            <button class="danger" type="submit">Desvincular MP</button>
-          </form>
-        </td>
-      </tr>
+        <tr>
+          <td>${escaparHtml(id)}</td>
+          <td><span class="tag">${escaparHtml(d.tipo || detectarTipoDevice(id))}</span></td>
+          <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
+          <td class="${d.ownerLinked ? "ok" : "bad"}">${d.ownerLinked ? "VINCULADA" : "NO VINCULADA"}</td>
+          <td>
+            <form method="POST" action="/admin/device/${encodeURIComponent(id)}/commission">
+              <input name="comision" value="${d.comisionEvetecPorcentaje}" size="4"> %
+              <button class="save" type="submit">OK</button>
+            </form>
+          </td>
+          <td>${escaparHtml(last)}</td>
+          <td>
+            <form method="POST" action="/unlink-owner/${encodeURIComponent(id)}">
+              <button class="danger" type="submit">Desvincular MP</button>
+            </form>
+          </td>
+        </tr>
     `;
   }
 
@@ -1136,15 +1128,15 @@ app.get("/admin", (req, res) => {
 
   for (const p of pagosAspiradora) {
     html += `
-      <tr>
-        <td>${escaparHtml(p.external_reference)}</td>
-        <td>${escaparHtml(p.device_id)}</td>
-        <td>$${p.monto}</td>
-        <td>${p.segundos || 0}s</td>
-        <td>$${p.comisionEvetec || 0}</td>
-        <td>${escaparHtml(p.estado)}</td>
-        <td>${escaparHtml(p.creado ? new Date(p.creado).toLocaleString("es-AR") : "")}</td>
-      </tr>
+        <tr>
+          <td>${escaparHtml(p.external_reference)}</td>
+          <td>${escaparHtml(p.device_id)}</td>
+          <td>$${p.monto}</td>
+          <td>${p.segundos || 0}s</td>
+          <td>$${p.comisionEvetec || 0}</td>
+          <td>${escaparHtml(p.estado)}</td>
+          <td>${escaparHtml(p.creado ? new Date(p.creado).toLocaleString("es-AR") : "")}</td>
+        </tr>
     `;
   }
 
@@ -1173,20 +1165,20 @@ app.get("/admin", (req, res) => {
 
   for (const p of pagosGalaga) {
     html += `
-      <tr>
-        <td>${escaparHtml(p.external_reference)}</td>
-        <td>${escaparHtml(p.device_id)}</td>
-        <td>$${p.monto}</td>
-        <td>${p.creditos || 0}</td>
-        <td>$${p.comisionEvetec || 0}</td>
-        <td>${escaparHtml(p.estado)}</td>
-        <td>${escaparHtml(p.creado ? new Date(p.creado).toLocaleString("es-AR") : "")}</td>
-      </tr>
+        <tr>
+          <td>${escaparHtml(p.external_reference)}</td>
+          <td>${escaparHtml(p.device_id)}</td>
+          <td>$${p.monto}</td>
+          <td>${p.creditos || 0}</td>
+          <td>$${p.comisionEvetec || 0}</td>
+          <td>${escaparHtml(p.estado)}</td>
+          <td>${escaparHtml(p.creado ? new Date(p.creado).toLocaleString("es-AR") : "")}</td>
+        </tr>
     `;
   }
 
   html += `
-    </table>
+      </table>
     </div>
 
   </body>
@@ -1195,11 +1187,6 @@ app.get("/admin", (req, res) => {
 
   res.send(html);
 });
-
-// =====================================================
-// ACCIONES ADMIN ASPIRADORAS
-// =====================================================
-
 app.post("/admin/global/update", (req, res) => {
   configGlobal.activo = req.body.activo === "on";
   configGlobal.mensajeGlobalActivo = req.body.mensajeGlobalActivo === "on";
