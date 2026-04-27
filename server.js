@@ -219,7 +219,8 @@ app.post("/game/crear-pago", async (req, res) => {
       qr_matrix: ""
     });
   }
-});  const qr = QRCode.create(texto, { errorCorrectionLevel: "M" });
+async function generarQRMatrix(texto) {
+  const qr = QRCode.create(texto, { errorCorrectionLevel: "M" });
   const size = qr.modules.size;
   const data = qr.modules.data;
 
@@ -231,6 +232,11 @@ app.post("/game/crear-pago", async (req, res) => {
     }
   }
 
+  return {
+    qr_size: size,
+    qr_matrix: matrix
+  };
+}
   return {
     qr_size: size,
     qr_matrix: matrix
