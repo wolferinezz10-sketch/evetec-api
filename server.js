@@ -190,24 +190,36 @@ function calcularComision(deviceId, monto) {
   return Math.max(0, Math.round(Number(monto) * porcentaje / 100));
 }
 
-function normalizarPedidoPago(body) {
-  const device_id = String(body.device_id || body.deviceId || "ASPIRADORA_001");
-  const monto = Number(body.monto || body.amount || body.precio);
-  const segundos = Number(body.segundos || body.seconds || 0);
+app.post("/game/crear-pago", async (req, res) => {
+  try {
+    const pedido = normalizarPedidoGame(req.body);
 
-  return { device_id, monto, segundos };
-}
+    const pago = await crearPagoGameMercadoPago(pedido);
+    const qr = await generarQRMatrix(pago.link);
 
-function normalizarPedidoGame(body) {
-  const device_id = String(body.device_id || body.deviceId || "GALAGA_001");
-  const monto = Number(body.monto || body.amount || body.precio);
-  const creditos = Number(body.creditos || body.credits || 0);
+    res.json({
+      ok: true,
+      id: pago.id,
+      payment_id: pago.id,
+      preference_id: pago.preference_id,
+      external_reference: pago.external_reference,
+      link: pago.link,
+      qr_size: qr.qr_size,
+      qr_matrix: qr.qr_matrix,
+      creditos: pedido.creditos,
+      monto: pedido.monto
+    });
+  } catch (err) {
+    console.error("Error /game/crear-pago:", err.message);
 
-  return { device_id, monto, creditos };
-}
-
-async function generarQRMatrix(texto) {
-  const qr = QRCode.create(texto, { errorCorrectionLevel: "M" });
+    res.json({
+      ok: false,
+      error: err.message,
+      qr_size: 0,
+      qr_matrix: ""
+    });
+  }
+});  const qr = QRCode.create(texto, { errorCorrectionLevel: "M" });
   const size = qr.modules.size;
   const data = qr.modules.data;
 
