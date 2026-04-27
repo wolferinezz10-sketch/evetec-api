@@ -190,35 +190,42 @@ function calcularComision(deviceId, monto) {
   return Math.max(0, Math.round(Number(monto) * porcentaje / 100));
 }
 
-app.post("/game/crear-pago", async (req, res) => {
-  try {
-    const pedido = normalizarPedidoGame(req.body);
+function normalizarPedidoPago(body) {
+  const device_id = String(body.device_id || body.deviceId || "ASPIRADORA_001");
+  const segundos = Number(body.segundos || body.seconds || body.tiempo || 0);
 
-    const pago = await crearPagoGameMercadoPago(pedido);
-    const qr = await generarQRMatrix(pago.link);
+  let plan = configGlobal.planes.find(p => Number(p.segundos) === segundos);
+  if (!plan) plan = configGlobal.planes[0];
 
-    res.json({
-      ok: true,
-      id: pago.id,
-      payment_id: pago.id,
-      preference_id: pago.preference_id,
-      external_reference: pago.external_reference,
-      link: pago.link,
-      qr_size: qr.qr_size,
-      qr_matrix: qr.qr_matrix,
-      creditos: pedido.creditos,
-      monto: pedido.monto
-    });
-  } catch (err) {
-    console.error("Error /game/crear-pago:", err.message);
+  return {
+    device_id,
+    monto: Number(plan.monto),
+    segundos: Number(plan.segundos)
+  };
+}
 
-    res.json({
-      ok: false,
-      error: err.message,
-      qr_size: 0,
-      qr_matrix: ""
-    });
-  }
+function normalizarPedidoGame(body) {
+  const device_id = String(body.device_id || body.deviceId || "GALAGA_001");
+
+  const creditos = Number(
+    body.creditos ||
+    body.credits ||
+    body.credito ||
+    body.paqueteCreditos ||
+    body.paquete ||
+    0
+  );
+
+  let plan = configGame.precios.find(p => Number(p.creditos) === creditos);
+  if (!plan) plan = configGame.precios[0];
+
+  return {
+    device_id,
+    monto: Number(plan.monto),
+    creditos: Number(plan.creditos)
+  };
+}
+
 async function generarQRMatrix(texto) {
   const qr = QRCode.create(texto, { errorCorrectionLevel: "M" });
   const size = qr.modules.size;
@@ -236,15 +243,7 @@ async function generarQRMatrix(texto) {
     qr_size: size,
     qr_matrix: matrix
   };
-}
-  return {
-    qr_size: size,
-    qr_matrix: matrix
-  };
-}
-
-function obtenerTokenParaCobrar(deviceId) {
-  const d = asegurarDevice(deviceId);
+}  const d = asegurarDevice(deviceId);
 
   if (d.ownerLinked && d.ownerAccessToken) {
     return d.ownerAccessToken;
