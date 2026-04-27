@@ -40,6 +40,16 @@ let configGlobal = {
   }
 };
 
+let configGame = {
+  activo: true,
+  mensaje: "GALAGA ARCADE listo para usar",
+  precios: [
+    { nombre: "1 CREDITO", creditos: 1, monto: 10, montoBase: 10, descripcion: "Una partida" },
+    { nombre: "3 CREDITOS", creditos: 3, monto: 20, montoBase: 20, descripcion: "Pack jugador" },
+    { nombre: "5 CREDITOS", creditos: 5, monto: 30, montoBase: 30, descripcion: "Pack arcade" }
+  ]
+};
+
 let devices = {
   ASPIRADORA_001: {
     tipo: "aspiradora",
@@ -64,10 +74,23 @@ let devices = {
     ownerUserId: null,
     ownerEmail: "",
     comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE
+  },
+  GALAGA_001: {
+    tipo: "game",
+    activo: true,
+    online: false,
+    ultimaConexion: null,
+    ownerLinked: false,
+    ownerAccessToken: null,
+    ownerRefreshToken: null,
+    ownerUserId: null,
+    ownerEmail: "",
+    comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE
   }
 };
 
 let pagosCreados = {};
+let pagosGame = {};
 
 const DATA_FILE = "evetec-data.json";
 
@@ -75,7 +98,7 @@ function guardarDatos() {
   try {
     fs.writeFileSync(
       DATA_FILE,
-      JSON.stringify({ devices, pagosCreados, configGlobal }, null, 2)
+      JSON.stringify({ devices, pagosCreados, pagosGame, configGlobal, configGame }, null, 2)
     );
   } catch (err) {
     console.error("Error guardando datos:", err.message);
@@ -90,7 +113,9 @@ function cargarDatos() {
 
     if (data.devices) devices = data.devices;
     if (data.pagosCreados) pagosCreados = data.pagosCreados;
+    if (data.pagosGame) pagosGame = data.pagosGame;
     if (data.configGlobal) configGlobal = data.configGlobal;
+    if (data.configGame) configGame = data.configGame;
 
     console.log("Datos EVETEC cargados");
   } catch (err) {
@@ -100,10 +125,20 @@ function cargarDatos() {
 
 cargarDatos();
 
+function detectarTipoDevice(deviceId) {
+  const id = String(deviceId || "").toUpperCase();
+
+  if (id.includes("GALAGA") || id.includes("ARCADE") || id.includes("GAME")) {
+    return "game";
+  }
+
+  return "aspiradora";
+}
+
 function asegurarDevice(deviceId) {
   if (!devices[deviceId]) {
     devices[deviceId] = {
-      tipo: "aspiradora",
+      tipo: detectarTipoDevice(deviceId),
       activo: true,
       online: false,
       ultimaConexion: null,
@@ -114,6 +149,42 @@ function asegurarDevice(deviceId) {
       ownerEmail: "",
       comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE
     };
+  }
+
+  if (!devices[deviceId].tipo) {
+    devices[deviceId].tipo = detectarTipoDevice(deviceId);
+  }
+
+  if (typeof devices[deviceId].activo === "undefined") {
+    devices[deviceId].activo = true;
+  }
+
+  if (typeof devices[deviceId].online === "undefined") {
+    devices[deviceId].online = false;
+  }
+
+  if (typeof devices[deviceId].ownerLinked === "undefined") {
+    devices[deviceId].ownerLinked = false;
+  }
+
+  if (typeof devices[deviceId].ownerAccessToken === "undefined") {
+    devices[deviceId].ownerAccessToken = null;
+  }
+
+  if (typeof devices[deviceId].ownerRefreshToken === "undefined") {
+    devices[deviceId].ownerRefreshToken = null;
+  }
+
+  if (typeof devices[deviceId].ownerUserId === "undefined") {
+    devices[deviceId].ownerUserId = null;
+  }
+
+  if (typeof devices[deviceId].ownerEmail === "undefined") {
+    devices[deviceId].ownerEmail = "";
+  }
+
+  if (typeof devices[deviceId].comisionEvetecPorcentaje === "undefined") {
+    devices[deviceId].comisionEvetecPorcentaje = COMISION_EVETEC_PORCENTAJE;
   }
 
   return devices[deviceId];
@@ -143,6 +214,14 @@ function normalizarPedidoPago(body) {
   const segundos = Number(body.segundos || body.seconds || body.creditos || 0);
 
   return { device_id, monto, segundos };
+}
+
+function normalizarPedidoGame(body) {
+  const device_id = String(body.device_id || body.deviceId || "GALAGA_001");
+  const monto = Number(body.monto || body.amount || body.precio);
+  const creditos = Number(body.creditos || body.credits || 0);
+
+  return { device_id, monto, creditos };
 }
 
 async function generarQRMatrix(texto) {
@@ -175,7 +254,7 @@ function obtenerTokenParaCobrar(deviceId) {
 }
 
 // =====================================================
-// CONFIG PARA ESP32
+// CONFIG PARA ESP32 ASPIRADORAS
 // =====================================================
 
 app.get("/config/:deviceId", (req, res) => {
@@ -196,6 +275,30 @@ app.get("/config/:deviceId", (req, res) => {
     planes: configGlobal.planes,
     promoGlobal: configGlobal.promoGlobal.activa ? configGlobal.promoGlobal : null,
     promoGlobalEspecial: configGlobal.promoGlobal.activa ? configGlobal.promoGlobal : null,
+    ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
+  });
+});
+
+// =====================================================
+// CONFIG PARA JUEGO GALAGA
+// =====================================================
+
+app.get("/game/config/:deviceId", (req, res) => {
+  const deviceId = req.params.deviceId;
+  const d = asegurarDevice(deviceId);
+
+  d.tipo = "game";
+  d.online = true;
+  d.ultimaConexion = new Date().toISOString();
+
+  res.json({
+    ok: true,
+    activo: Boolean(configGame.activo && d.activo),
+    tipo: "game",
+    projectType: "GALAGA_ARCADE",
+    mensaje: configGame.mensaje || "",
+    precios: configGame.precios,
     ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
     comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
   });
@@ -330,6 +433,7 @@ app.get("/owner-status/:deviceId", (req, res) => {
     ok: true,
     linked: Boolean(d.ownerLinked && d.ownerAccessToken),
     ownerUserId: d.ownerUserId || null,
+    tipo: d.tipo || detectarTipoDevice(req.params.deviceId),
     comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
   });
 });
@@ -367,7 +471,7 @@ app.get("/unlink/:deviceId", (req, res) => {
 });
 
 // =====================================================
-// MERCADO PAGO - CREAR PAGO
+// MERCADO PAGO - CREAR PAGO ASPIRADORA
 // =====================================================
 
 async function crearPagoMercadoPago({ device_id, monto, segundos }) {
@@ -442,6 +546,7 @@ async function crearPagoMercadoPago({ device_id, monto, segundos }) {
     preference_id: data.id,
     external_reference,
     device_id,
+    tipo: "aspiradora",
     monto,
     segundos,
     comisionEvetec,
@@ -481,7 +586,7 @@ app.post("/crear-pago", async (req, res) => {
     const pago = await crearPagoMercadoPago(pedido);
     const qr = await generarQRMatrix(pago.link);
 
-    console.log("Pago creado:", pedido.device_id, "$" + pedido.monto, pedido.segundos + "s");
+    console.log("Pago aspiradora creado:", pedido.device_id, "$" + pedido.monto, pedido.segundos + "s");
 
     res.json({
       ok: true,
@@ -506,7 +611,149 @@ app.post("/crear-pago", async (req, res) => {
 });
 
 // =====================================================
-// MERCADO PAGO - ESTADO DEL PAGO
+// MERCADO PAGO - CREAR PAGO JUEGO GALAGA
+// =====================================================
+async function crearPagoGameMercadoPago({ device_id, monto, creditos }) {
+  const d = asegurarDevice(device_id);
+  d.tipo = "game";
+
+  const token = obtenerTokenParaCobrar(device_id);
+
+  if (!token) {
+    throw new Error("Falta token Mercado Pago. Vincule una cuenta o configure token EVETEC.");
+  }
+
+  if (!monto || monto <= 0) {
+    throw new Error("Monto inválido");
+  }
+
+  if (!creditos || creditos <= 0) {
+    throw new Error("Créditos inválidos");
+  }
+
+  if (!configGame.activo || !d.activo) {
+    throw new Error("Juego desactivado");
+  }
+
+  const external_reference = `GAME_${device_id}_${Date.now()}`;
+  const comisionEvetec = calcularComision(device_id, monto);
+  const netoDuenioEstimado = Math.max(0, Number(monto) - comisionEvetec);
+
+  const body = {
+    items: [
+      {
+        title: `EVETEC GALAGA ${device_id} - ${creditos} créditos`,
+        quantity: 1,
+        currency_id: "ARS",
+        unit_price: Number(monto)
+      }
+    ],
+    marketplace_fee: comisionEvetec,
+    external_reference,
+    metadata: {
+      device_id,
+      tipo: "game",
+      project_type: "GALAGA_ARCADE",
+      creditos,
+      monto_total: Number(monto),
+      comision_evetec: comisionEvetec,
+      neto_duenio_estimado: netoDuenioEstimado,
+      owner_linked: Boolean(d.ownerLinked)
+    }
+  };
+
+  const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await r.json();
+
+  if (!r.ok) {
+    console.error("Mercado Pago error GAME:", data);
+    throw new Error(data.message || "Error creando pago Mercado Pago para juego");
+  }
+
+  const link = data.init_point || data.sandbox_init_point;
+
+  if (!link) {
+    throw new Error("Mercado Pago no devolvió link de pago");
+  }
+
+  pagosGame[external_reference] = {
+    preference_id: data.id,
+    external_reference,
+    device_id,
+    tipo: "game",
+    monto,
+    creditos,
+    comisionEvetec,
+    netoDuenioEstimado,
+    estado: "pending",
+    link,
+    creado: new Date().toISOString()
+  };
+
+  if (data.id) {
+    pagosGame[data.id] = pagosGame[external_reference];
+  }
+
+  guardarDatos();
+
+  return {
+    id: external_reference,
+    preference_id: data.id,
+    external_reference,
+    link
+  };
+}
+
+app.post("/game/crear-pago", async (req, res) => {
+  try {
+    const pedido = normalizarPedidoGame(req.body);
+
+    if (!pedido.monto || !pedido.creditos) {
+      return res.json({
+        ok: false,
+        error: "Faltan monto o creditos",
+        qr_size: 0,
+        qr_matrix: ""
+      });
+    }
+
+    const pago = await crearPagoGameMercadoPago(pedido);
+    const qr = await generarQRMatrix(pago.link);
+
+    console.log("Pago juego creado:", pedido.device_id, "$" + pedido.monto, pedido.creditos + " créditos");
+
+    res.json({
+      ok: true,
+      id: pago.id,
+      payment_id: pago.id,
+      preference_id: pago.preference_id,
+      external_reference: pago.external_reference,
+      link: pago.link,
+      qr_size: qr.qr_size,
+      qr_matrix: qr.qr_matrix
+    });
+  } catch (err) {
+    console.error("Error /game/crear-pago:", err.message);
+
+    res.json({
+      ok: false,
+      error: err.message,
+      qr_size: 0,
+      qr_matrix: ""
+    });
+  }
+});
+
+// =====================================================
+// MERCADO PAGO - ESTADO DEL PAGO ASPIRADORA
 // =====================================================
 
 async function buscarEstadoMercadoPago(id) {
@@ -558,7 +805,7 @@ async function buscarEstadoMercadoPago(id) {
       };
     }
   } catch (err) {
-    console.error("Error consultando pago:", err.message);
+    console.error("Error consultando pago aspiradora:", err.message);
   }
 
   return {
@@ -583,278 +830,89 @@ app.get("/estado/:paymentId", async (req, res) => {
 });
 
 // =====================================================
-// PANEL ADMIN
+// MERCADO PAGO - ESTADO DEL PAGO JUEGO GALAGA
 // =====================================================
 
-app.get("/", (req, res) => {
-  res.redirect("/admin");
-});
+async function buscarEstadoGameMercadoPago(id) {
+  const pagoLocal = pagosGame[id];
+  const deviceId = pagoLocal?.device_id;
+  const token = deviceId ? obtenerTokenParaCobrar(deviceId) : EVETEC_MP_TOKEN;
 
-app.get("/admin", (req, res) => {
-  let html = `
-  <!doctype html>
-  <html>
-  <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>EVETEC Admin</title>
-    <style>
-      body { font-family: Arial; background:#050816; color:white; padding:20px; }
-      h1 { color:#22d3ee; margin-bottom:4px; }
-      h2 { color:#facc15; }
-      .box { background:#111827; border:1px solid #22d3ee; border-radius:14px; padding:16px; margin-bottom:20px; }
-      input, select { padding:8px; margin:4px; border-radius:8px; border:0; }
-      button { padding:10px 14px; border:0; border-radius:10px; font-weight:bold; cursor:pointer; margin:4px; }
-      .save { background:#22c55e; color:#001b08; }
-      .danger { background:#ef4444; color:white; }
-      .promo { background:#facc15; color:#111; }
-      .online { color:#22c55e; }
-      .offline { color:#ef4444; }
-      .small { color:#94a3b8; font-size:13px; }
-      .tag { display:inline-block; background:#0f172a; color:#67e8f9; border:1px solid #155e75; border-radius:999px; padding:4px 10px; font-size:12px; }
-      .ok { color:#22c55e; }
-      .bad { color:#ef4444; }
-      table { width:100%; border-collapse: collapse; }
-      td, th { border-bottom:1px solid #1f2937; padding:8px; text-align:left; vertical-align:middle; }
-    </style>
-  </head>
-  <body>
-    <h1>EVETEC PANEL MAESTRO</h1>
-    <p class="small">Base pública: ${escaparHtml(PUBLIC_BASE_URL)}</p>
-    <p class="small">Redirect OAuth: ${escaparHtml(REDIRECT_URI)}</p>
-    <p class="small">
-      MP_CLIENT_ID: <b class="${MP_CLIENT_ID ? "ok" : "bad"}">${MP_CLIENT_ID ? "OK" : "FALTA"}</b> |
-      MP_CLIENT_SECRET: <b class="${MP_CLIENT_SECRET ? "ok" : "bad"}">${MP_CLIENT_SECRET ? "OK" : "FALTA"}</b> |
-      Token fallback EVETEC: <b class="${EVETEC_MP_TOKEN ? "ok" : "bad"}">${EVETEC_MP_TOKEN ? "OK" : "FALTA"}</b>
-    </p>
-
-    <div class="box">
-      <h2>Estado general</h2>
-      <form method="POST" action="/admin/global/update">
-        Sistema activo:
-        <input type="checkbox" name="activo" ${configGlobal.activo ? "checked" : ""}><br>
-
-        Mensaje global activo:
-        <input type="checkbox" name="mensajeGlobalActivo" ${configGlobal.mensajeGlobalActivo ? "checked" : ""}><br>
-
-        Mensaje global:
-        <input name="mensajeGlobal" value="${escaparHtml(configGlobal.mensajeGlobal)}" size="50"><br>
-
-        <button class="save" type="submit">Guardar estado general</button>
-      </form>
-    </div>
-
-    <div class="box">
-      <h2>Precios globales para todas las aspiradoras</h2>
-      <form method="POST" action="/admin/prices/update">
-  `;
-
-  configGlobal.planes.forEach((p, i) => {
-    html += `
-      <div>
-        Nombre:
-        <input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="10">
-        Seg:
-        <input name="segundos${i}" value="${p.segundos}" size="6">
-        Precio:
-        <input name="monto${i}" value="${p.monto}" size="6">
-        Desc:
-        <input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="24">
-      </div>
-    `;
-  });
-
-  html += `
-        <button class="save" type="submit">Guardar precios globales</button>
-      </form>
-
-      <h3>Aplicar descuento global</h3>
-      <form method="POST" action="/admin/discount">
-        <button class="promo" name="descuento" value="50">50% OFF</button>
-        <button class="promo" name="descuento" value="40">40% OFF</button>
-        <button class="promo" name="descuento" value="30">30% OFF</button>
-        <button class="promo" name="descuento" value="20">20% OFF</button>
-        <button class="promo" name="descuento" value="10">10% OFF</button>
-        <button class="promo" name="descuento" value="5">5% OFF</button>
-      </form>
-
-      <form method="POST" action="/admin/reset-prices">
-        <button class="danger" type="submit">Restaurar precios base</button>
-      </form>
-    </div>
-
-    <div class="box">
-      <h2>Promo global opcional</h2>
-      <form method="POST" action="/admin/promo/update">
-        Activa:
-        <input type="checkbox" name="activa" ${configGlobal.promoGlobal.activa ? "checked" : ""}><br>
-        Nombre:
-        <input name="nombre" value="${escaparHtml(configGlobal.promoGlobal.nombre)}" size="20"><br>
-        Duración:
-        <input name="segundos" value="${configGlobal.promoGlobal.segundos}" size="8"> segundos<br>
-        Precio:
-        <input name="monto" value="${configGlobal.promoGlobal.monto}" size="8"><br>
-        Descripción:
-        <input name="descripcion" value="${escaparHtml(configGlobal.promoGlobal.descripcion)}" size="50"><br>
-
-        <button class="save" type="submit">Guardar promo global</button>
-      </form>
-    </div>
-
-    <div class="box">
-      <h2>Máquinas vinculadas</h2>
-      <table>
-        <tr>
-          <th>Equipo</th>
-          <th>Online</th>
-          <th>Cuenta MP</th>
-          <th>Comisión</th>
-          <th>Última conexión</th>
-          <th>Acciones</th>
-        </tr>
-  `;
-
-  for (const id of Object.keys(devices)) {
-    const d = devices[id];
-    const last = d.ultimaConexion ? new Date(d.ultimaConexion).toLocaleString("es-AR") : "Nunca";
-
-    html += `
-      <tr>
-        <td>${escaparHtml(id)}</td>
-        <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
-        <td class="${d.ownerLinked ? "ok" : "bad"}">${d.ownerLinked ? "VINCULADA" : "NO VINCULADA"}</td>
-        <td>
-          <form method="POST" action="/admin/device/${encodeURIComponent(id)}/commission">
-            <input name="comision" value="${d.comisionEvetecPorcentaje}" size="4"> %
-            <button class="save" type="submit">OK</button>
-          </form>
-        </td>
-        <td>${escaparHtml(last)}</td>
-        <td>
-          <form method="POST" action="/unlink-owner/${encodeURIComponent(id)}">
-            <button class="danger" type="submit">Desvincular MP</button>
-          </form>
-        </td>
-      </tr>
-    `;
+  if (!token) {
+    return {
+      estado: "pending",
+      detalle: "sin_token",
+      creditos: 0
+    };
   }
 
-  html += `
-      </table>
-    </div>
+  const externalRef = pagoLocal?.external_reference || id;
 
-    <div class="box">
-      <h2>Últimos pagos</h2>
-      <table>
-        <tr>
-          <th>Referencia</th>
-          <th>Equipo</th>
-          <th>Monto</th>
-          <th>Comisión EVETEC</th>
-          <th>Estado</th>
-          <th>Fecha</th>
-        </tr>
-  `;
+  try {
+    const url =
+      "https://api.mercadopago.com/v1/payments/search" +
+      `?external_reference=${encodeURIComponent(externalRef)}` +
+      `&sort=date_created&criteria=desc`;
 
-  const pagos = Object.values(pagosCreados)
-    .filter((p, index, arr) => arr.findIndex(x => x.external_reference === p.external_reference) === index)
-    .slice(-20)
-    .reverse();
+    const r = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
 
-  for (const p of pagos) {
-    html += `
-      <tr>
-        <td>${escaparHtml(p.external_reference)}</td>
-        <td>${escaparHtml(p.device_id)}</td>
-        <td>$${p.monto}</td>
-        <td>$${p.comisionEvetec}</td>
-        <td>${escaparHtml(p.estado)}</td>
-        <td>${escaparHtml(new Date(p.creado).toLocaleString("es-AR"))}</td>
-      </tr>
-    `;
+    const data = await r.json();
+
+    if (r.ok && Array.isArray(data.results) && data.results.length > 0) {
+      const pago = data.results[0];
+
+      const estado = pago.status || "pending";
+      const detalle = pago.status_detail || "";
+
+      if (pagoLocal) {
+        pagoLocal.estado = estado;
+        pagoLocal.payment_id = pago.id;
+        pagoLocal.detalle = detalle;
+        guardarDatos();
+      }
+
+      return {
+        estado,
+        detalle,
+        payment_id: pago.id,
+        creditos: pagoLocal?.creditos || pago.metadata?.creditos || 0
+      };
+    }
+  } catch (err) {
+    console.error("Error consultando pago juego:", err.message);
   }
 
-  html += `
-      </table>
-    </div>
-  </body>
-  </html>
-  `;
+  return {
+    estado: pagoLocal?.estado || "pending",
+    detalle: pagoLocal ? "esperando_pago" : "no_encontrado",
+    creditos: pagoLocal?.creditos || 0
+  };
+}
 
-  res.send(html);
+app.get("/game/estado/:paymentId", async (req, res) => {
+  try {
+    const estado = await buscarEstadoGameMercadoPago(req.params.paymentId);
+
+    res.json({
+      estado: estado.estado,
+      detalle: estado.detalle,
+      payment_id: estado.payment_id,
+      creditos: estado.creditos
+    });
+  } catch (err) {
+    console.error("Error /game/estado:", err.message);
+
+    res.json({
+      estado: "pending",
+      detalle: "error_server",
+      creditos: 0
+    });
+  }
 });
-
-// =====================================================
-// ACCIONES ADMIN
-// =====================================================
-
-app.post("/admin/global/update", (req, res) => {
-  configGlobal.activo = req.body.activo === "on";
-  configGlobal.mensajeGlobalActivo = req.body.mensajeGlobalActivo === "on";
-  configGlobal.mensajeGlobal = req.body.mensajeGlobal || "";
-  guardarDatos();
-  res.redirect("/admin");
-});
-
-app.post("/admin/prices/update", (req, res) => {
-  configGlobal.planes.forEach((p, i) => {
-    p.nombre = req.body[`nombre${i}`] || p.nombre;
-    p.segundos = Number(req.body[`segundos${i}`]) || p.segundos;
-    p.monto = Number(req.body[`monto${i}`]) || p.monto;
-    p.montoBase = p.monto;
-    p.descripcion = req.body[`descripcion${i}`] || p.descripcion;
-  });
-
-  guardarDatos();
-  res.redirect("/admin");
-});
-
-app.post("/admin/discount", (req, res) => {
-  const descuento = Number(req.body.descuento) || 0;
-
-  configGlobal.planes = configGlobal.planes.map(p => ({
-    ...p,
-    montoBase: p.montoBase || p.monto,
-    monto: aplicarDescuento(p.montoBase || p.monto, descuento)
-  }));
-
-  configGlobal.mensajeGlobalActivo = true;
-  configGlobal.mensajeGlobal = `Promoción global aplicada: ${descuento}% OFF`;
-
-  guardarDatos();
-  res.redirect("/admin");
-});
-
-app.post("/admin/reset-prices", (req, res) => {
-  configGlobal.planes = configGlobal.planes.map(p => ({
-    ...p,
-    monto: p.montoBase || p.monto
-  }));
-
-  configGlobal.mensajeGlobalActivo = true;
-  configGlobal.mensajeGlobal = "Precios normales restaurados";
-
-  guardarDatos();
-  res.redirect("/admin");
-});
-
-app.post("/admin/promo/update", (req, res) => {
-  configGlobal.promoGlobal.activa = req.body.activa === "on";
-  configGlobal.promoGlobal.nombre = req.body.nombre || configGlobal.promoGlobal.nombre;
-  configGlobal.promoGlobal.segundos = Number(req.body.segundos) || configGlobal.promoGlobal.segundos;
-  configGlobal.promoGlobal.monto = Number(req.body.monto) || configGlobal.promoGlobal.monto;
-  configGlobal.promoGlobal.descripcion = req.body.descripcion || configGlobal.promoGlobal.descripcion;
-
-  guardarDatos();
-  res.redirect("/admin");
-});
-
-app.post("/admin/device/:deviceId/commission", (req, res) => {
-  const d = asegurarDevice(req.params.deviceId);
-  d.comisionEvetecPorcentaje = Number(req.body.comision) || d.comisionEvetecPorcentaje;
-  guardarDatos();
-  res.redirect("/admin");
-});
-
 // =====================================================
 // STATUS / HEALTH
 // =====================================================
@@ -862,15 +920,14 @@ app.post("/admin/device/:deviceId/commission", (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    server: "EVETEC_GLOBAL_OAUTH",
-    publicBaseUrl: PUBLIC_BASE_URL,
-    redirectUri: REDIRECT_URI,
-    mpClientId: Boolean(MP_CLIENT_ID),
-    mpClientSecret: Boolean(MP_CLIENT_SECRET),
-    fallbackToken: Boolean(EVETEC_MP_TOKEN),
+    server: "EVETEC_FULL_SYSTEM",
     devices
   });
 });
+
+// =====================================================
+// CONTROL ONLINE DEVICES
+// =====================================================
 
 setInterval(() => {
   const ahora = Date.now();
@@ -889,16 +946,14 @@ setInterval(() => {
 }, 5000);
 
 // =====================================================
-// START
+// START SERVER
 // =====================================================
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log("=======================================");
-  console.log(" EVETEC SERVER GLOBAL + OAUTH");
+  console.log(" EVETEC SERVER + GAME + ASPIRADORAS");
   console.log("=======================================");
-  console.log(`Servidor local: http://localhost:${PORT}`);
-  console.log(`URL pública: ${PUBLIC_BASE_URL}`);
-  console.log(`Redirect URI: ${REDIRECT_URI}`);
-  console.log(`Admin: ${PUBLIC_BASE_URL}/admin`);
+  console.log(`Servidor: http://localhost:${PORT}`);
+  console.log(`Public: ${PUBLIC_BASE_URL}`);
   console.log("=======================================");
 });
