@@ -1,0 +1,52 @@
+{
+  "devices": {
+    "ASPIRADORA_001": {
+      "enabled": true,
+      "name": "Aspiradora 001",
+      "mensaje": "Promo especial",
+      "promoActiva": true,
+      "planes": [
+        {
+          "nombre": "1 min",
+          "segundos": 60,
+          "monto": 102
+        },
+        {
+          "nombre": "2 min",
+          "segundos": 120,
+          "monto": 20
+        },
+        {
+          "nombre": "3 min",
+          "segundos": 180,
+          "monto": 30
+        }
+      ]
+    },
+    "ASPIRADORA_002": {
+      "enabled": true,
+      "name": "Aspiradora 002",
+      "mensaje": "Promo local activa",
+      "promoActiva": true,
+      "planes": [
+        {
+          "nombre": "1 min",
+          "segundos": 60,
+          "monto": 10
+        },
+        {
+          "nombre": "3 min",
+          "segundos": 180,
+          "monto": 20
+        },
+        {
+          "nombre": "5 min",
+          "segundos": 300,
+          "monto": 30
+        }
+      ]
+    }
+  },
+  "tickets": {},
+  "sales": []
+}

@@ -1,0 +1,19 @@
+{
+  "name": "evetec-qr-mercadopago",
+  "version": "1.0.0",
+  "description": "Servidor Mercado Pago para ESP32 EVETEC",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "qrcode": "^1.5.4"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
