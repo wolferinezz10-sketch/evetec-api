@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const QRCode = require("qrcode");
+const fs = require("fs");
 
 const app = express();
 
@@ -11,7 +12,7 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = Number(process.env.PORT || 3000);
 
 const PUBLIC_BASE_URL =
-  process.env.PUBLIC_BASE_URL || "https://juiciness-felt-tip-backward.ngrok-free.dev";
+  process.env.PUBLIC_BASE_URL || "https://evetec-api.onrender.com";
 
 const MP_CLIENT_ID = process.env.MP_CLIENT_ID;
 const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET;
@@ -21,40 +22,15 @@ const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
 
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
 
-// =====================================================
-// CONFIG GLOBAL PARA TODAS LAS ASPIRADORAS
-// =====================================================
-
 let configGlobal = {
   activo: true,
-
   mensajeGlobalActivo: true,
   mensajeGlobal: "Sistema EVETEC listo para usar",
-
   planes: [
-    {
-      nombre: "1m 30s",
-      segundos: 90,
-      monto: 100,
-      montoBase: 100,
-      descripcion: "Limpieza rápida"
-    },
-    {
-      nombre: "3m",
-      segundos: 180,
-      monto: 250,
-      montoBase: 250,
-      descripcion: "Auto chico / retoque"
-    },
-    {
-      nombre: "5m",
-      segundos: 300,
-      monto: 400,
-      montoBase: 400,
-      descripcion: "Limpieza completa"
-    }
+    { nombre: "1m 30s", segundos: 90, monto: 100, montoBase: 100, descripcion: "Limpieza rápida" },
+    { nombre: "3m", segundos: 180, monto: 250, montoBase: 250, descripcion: "Auto chico / retoque" },
+    { nombre: "5m", segundos: 300, monto: 400, montoBase: 400, descripcion: "Limpieza completa" }
   ],
-
   promoGlobal: {
     activa: false,
     nombre: "PROMO GLOBAL",
@@ -64,47 +40,65 @@ let configGlobal = {
   }
 };
 
-// =====================================================
-// MÁQUINAS
-// =====================================================
-
 let devices = {
   ASPIRADORA_001: {
     tipo: "aspiradora",
     activo: true,
     online: false,
     ultimaConexion: null,
-
     ownerLinked: false,
     ownerAccessToken: null,
     ownerRefreshToken: null,
     ownerUserId: null,
     ownerEmail: "",
-
     comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE
   },
-
   ASPIRADORA_002: {
     tipo: "aspiradora",
     activo: true,
     online: false,
     ultimaConexion: null,
-
     ownerLinked: false,
     ownerAccessToken: null,
     ownerRefreshToken: null,
     ownerUserId: null,
     ownerEmail: "",
-
     comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE
   }
 };
 
 let pagosCreados = {};
 
-// =====================================================
-// UTILIDADES
-// =====================================================
+const DATA_FILE = "evetec-data.json";
+
+function guardarDatos() {
+  try {
+    fs.writeFileSync(
+      DATA_FILE,
+      JSON.stringify({ devices, pagosCreados, configGlobal }, null, 2)
+    );
+  } catch (err) {
+    console.error("Error guardando datos:", err.message);
+  }
+}
+
+function cargarDatos() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return;
+
+    const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+
+    if (data.devices) devices = data.devices;
+    if (data.pagosCreados) pagosCreados = data.pagosCreados;
+    if (data.configGlobal) configGlobal = data.configGlobal;
+
+    console.log("Datos EVETEC cargados");
+  } catch (err) {
+    console.error("Error cargando datos:", err.message);
+  }
+}
+
+cargarDatos();
 
 function asegurarDevice(deviceId) {
   if (!devices[deviceId]) {
@@ -113,13 +107,11 @@ function asegurarDevice(deviceId) {
       activo: true,
       online: false,
       ultimaConexion: null,
-
       ownerLinked: false,
       ownerAccessToken: null,
       ownerRefreshToken: null,
       ownerUserId: null,
       ownerEmail: "",
-
       comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE
     };
   }
@@ -196,19 +188,14 @@ app.get("/config/:deviceId", (req, res) => {
   res.json({
     activo: Boolean(configGlobal.activo && d.activo),
     tipo: "aspiradora",
-
     mensaje: configGlobal.mensajeGlobalActivo ? configGlobal.mensajeGlobal : "",
-
     mensajeGlobal: {
       activo: configGlobal.mensajeGlobalActivo,
       texto: configGlobal.mensajeGlobal
     },
-
     planes: configGlobal.planes,
-
     promoGlobal: configGlobal.promoGlobal.activa ? configGlobal.promoGlobal : null,
     promoGlobalEspecial: configGlobal.promoGlobal.activa ? configGlobal.promoGlobal : null,
-
     ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
     comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
   });
@@ -302,6 +289,8 @@ app.get("/oauth/callback", async (req, res) => {
     d.ownerUserId = data.user_id || null;
     d.ownerLinked = true;
 
+    guardarDatos();
+
     console.log("Cuenta MP vinculada:", deviceId, "user:", data.user_id);
 
     res.send(`
@@ -354,7 +343,27 @@ app.post("/unlink-owner/:deviceId", (req, res) => {
   d.ownerUserId = null;
   d.ownerEmail = "";
 
+  guardarDatos();
+
   res.redirect("/admin");
+});
+
+app.get("/unlink/:deviceId", (req, res) => {
+  const d = asegurarDevice(req.params.deviceId);
+
+  d.ownerLinked = false;
+  d.ownerAccessToken = null;
+  d.ownerRefreshToken = null;
+  d.ownerUserId = null;
+  d.ownerEmail = "";
+
+  guardarDatos();
+
+  res.json({
+    ok: true,
+    linked: false,
+    message: "Cuenta desvinculada"
+  });
 });
 
 // =====================================================
@@ -394,11 +403,8 @@ async function crearPagoMercadoPago({ device_id, monto, segundos }) {
         unit_price: Number(monto)
       }
     ],
-
     marketplace_fee: comisionEvetec,
-
     external_reference,
-
     metadata: {
       device_id,
       tipo: "aspiradora",
@@ -448,6 +454,8 @@ async function crearPagoMercadoPago({ device_id, monto, segundos }) {
   if (data.id) {
     pagosCreados[data.id] = pagosCreados[external_reference];
   }
+
+  guardarDatos();
 
   return {
     id: external_reference,
@@ -539,6 +547,7 @@ async function buscarEstadoMercadoPago(id) {
         pagoLocal.estado = estado;
         pagoLocal.payment_id = pago.id;
         pagoLocal.detalle = detalle;
+        guardarDatos();
       }
 
       return {
@@ -782,6 +791,7 @@ app.post("/admin/global/update", (req, res) => {
   configGlobal.activo = req.body.activo === "on";
   configGlobal.mensajeGlobalActivo = req.body.mensajeGlobalActivo === "on";
   configGlobal.mensajeGlobal = req.body.mensajeGlobal || "";
+  guardarDatos();
   res.redirect("/admin");
 });
 
@@ -794,6 +804,7 @@ app.post("/admin/prices/update", (req, res) => {
     p.descripcion = req.body[`descripcion${i}`] || p.descripcion;
   });
 
+  guardarDatos();
   res.redirect("/admin");
 });
 
@@ -809,6 +820,7 @@ app.post("/admin/discount", (req, res) => {
   configGlobal.mensajeGlobalActivo = true;
   configGlobal.mensajeGlobal = `Promoción global aplicada: ${descuento}% OFF`;
 
+  guardarDatos();
   res.redirect("/admin");
 });
 
@@ -821,6 +833,7 @@ app.post("/admin/reset-prices", (req, res) => {
   configGlobal.mensajeGlobalActivo = true;
   configGlobal.mensajeGlobal = "Precios normales restaurados";
 
+  guardarDatos();
   res.redirect("/admin");
 });
 
@@ -831,12 +844,14 @@ app.post("/admin/promo/update", (req, res) => {
   configGlobal.promoGlobal.monto = Number(req.body.monto) || configGlobal.promoGlobal.monto;
   configGlobal.promoGlobal.descripcion = req.body.descripcion || configGlobal.promoGlobal.descripcion;
 
+  guardarDatos();
   res.redirect("/admin");
 });
 
 app.post("/admin/device/:deviceId/commission", (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
   d.comisionEvetecPorcentaje = Number(req.body.comision) || d.comisionEvetecPorcentaje;
+  guardarDatos();
   res.redirect("/admin");
 });
 
