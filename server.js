@@ -1049,7 +1049,9 @@ app.get("/admin", (req, res) => {
       <form method="POST" action="/admin/game/reset-prices">
         <button class="danger" type="submit">Restaurar precios base GALAGA</button>
       </form>
-    </div>
+  </div>
+  `;
+
   html += `
     <div class="box">
       <h2>Promo global opcional aspiradoras</h2>
