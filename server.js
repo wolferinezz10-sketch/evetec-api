@@ -243,7 +243,11 @@ async function generarQRMatrix(texto) {
     qr_size: size,
     qr_matrix: matrix
   };
-}  const d = asegurarDevice(deviceId);
+}
+
+// 🔥 ESTA FUNCIÓN FALTABA Y ES CLAVE
+function obtenerTokenParaCobrar(deviceId) {
+  const d = asegurarDevice(deviceId);
 
   if (d.ownerLinked && d.ownerAccessToken) {
     return d.ownerAccessToken;
