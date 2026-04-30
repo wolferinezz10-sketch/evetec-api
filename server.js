@@ -6,7 +6,7 @@ const fs = require("fs");
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 const PORT = Number(process.env.PORT || 3000);
@@ -16,6 +16,7 @@ const MP_CLIENT_ID = process.env.MP_CLIENT_ID || "";
 const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || "";
 const EVETEC_MP_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || "";
 const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
+
 const DATA_FILE = process.env.DATA_FILE || "evetec-timers-data.json";
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
 
@@ -24,16 +25,19 @@ let configGlobal = {
   mensajeGlobalActivo: true,
   mensajeGlobal: "Sistema EVETEC listo para usar",
   moneda: "ARS",
+
   planes: [
     { id: "P1", nombre: "1m 30s", segundos: 90, monto: 100, montoBase: 100, descripcion: "Limpieza rápida" },
     { id: "P2", nombre: "3m", segundos: 180, monto: 250, montoBase: 250, descripcion: "Auto chico / retoque" },
     { id: "P3", nombre: "5m", segundos: 300, monto: 400, montoBase: 400, descripcion: "Limpieza completa" }
   ],
+
   preciosExtra: [
     { id: "E1", nombre: "+30s", segundos: 30, monto: 50, montoBase: 50, descripcion: "Tiempo extra corto" },
     { id: "E2", nombre: "+1m", segundos: 60, monto: 90, montoBase: 90, descripcion: "Tiempo extra" },
     { id: "E3", nombre: "+2m", segundos: 120, monto: 160, montoBase: 160, descripcion: "Tiempo extra extendido" }
   ],
+
   promoGlobal: {
     activa: false,
     id: "PROMO",
@@ -45,6 +49,16 @@ let configGlobal = {
   }
 };
 
+function statsIniciales() {
+  return {
+    totalRecaudado: 0,
+    pagosAprobados: 0,
+    segundosVendidos: 0,
+    tiempoMotor: 0,
+    ultimosPagos: []
+  };
+}
+
 function nuevoDevice() {
   return {
     tipo: "aspiradora",
@@ -53,13 +67,17 @@ function nuevoDevice() {
     modoMantenimiento: false,
     mensajeMantenimiento: "Equipo fuera de servicio por mantenimiento",
     ultimaConexion: null,
+
     ownerLinked: false,
     ownerAccessToken: null,
     ownerRefreshToken: null,
     ownerUserId: null,
     ownerEmail: "",
+
     comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE,
-    modoCobro: "owner_commission"
+    modoCobro: "owner_commission",
+
+    stats: statsIniciales()
   };
 }
 
@@ -70,40 +88,90 @@ let devices = {
 
 let pagosCreados = {};
 
+function escaparHtml(v) {
+  return String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;");
+}
+
 function limpiarDevicesMigrados(obj) {
   const limpio = {};
+
   for (const id of Object.keys(obj || {})) {
     const upper = String(id).toUpperCase();
-    if (upper.includes("GALAGA") || upper.includes("GAME") || upper.includes("ARCADE")) continue;
+
+    if (upper.includes("GALAGA")) continue;
+    if (upper.includes("GAME")) continue;
+    if (upper.includes("ARCADE")) continue;
+
     limpio[id] = obj[id];
   }
+
   return limpio;
+}
+
+function unirConfig(base, saved) {
+  const result = { ...base, ...saved };
+
+  result.planes = Array.isArray(saved.planes)
+    ? saved.planes.slice(0, 3)
+    : base.planes;
+
+  result.preciosExtra = Array.isArray(saved.preciosExtra)
+    ? saved.preciosExtra.slice(0, 3)
+    : base.preciosExtra;
+
+  result.promoGlobal = {
+    ...base.promoGlobal,
+    ...(saved.promoGlobal || {})
+  };
+
+  return result;
 }
 
 function guardarDatos() {
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ devices, pagosCreados, configGlobal }, null, 2));
+    fs.writeFileSync(
+      DATA_FILE,
+      JSON.stringify(
+        {
+          devices,
+          pagosCreados,
+          configGlobal
+        },
+        null,
+        2
+      )
+    );
   } catch (err) {
     console.error("Error guardando datos:", err.message);
   }
 }
 
-function unirConfig(base, saved) {
-  const result = { ...base, ...saved };
-  result.planes = Array.isArray(saved.planes) ? saved.planes.slice(0, 3) : base.planes;
-  result.preciosExtra = Array.isArray(saved.preciosExtra) ? saved.preciosExtra.slice(0, 3) : base.preciosExtra;
-  result.promoGlobal = { ...base.promoGlobal, ...(saved.promoGlobal || {}) };
-  return result;
-}
-
 function cargarDatos() {
   try {
     if (!fs.existsSync(DATA_FILE)) return;
+
     const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    if (data.configGlobal) configGlobal = unirConfig(configGlobal, data.configGlobal);
-    if (data.devices) devices = limpiarDevicesMigrados(data.devices);
-    if (data.pagosCreados) pagosCreados = data.pagosCreados;
-    if (!devices.ASPIRADORA_001) devices.ASPIRADORA_001 = nuevoDevice();
+
+    if (data.configGlobal) {
+      configGlobal = unirConfig(configGlobal, data.configGlobal);
+    }
+
+    if (data.devices) {
+      devices = limpiarDevicesMigrados(data.devices);
+    }
+
+    if (data.pagosCreados) {
+      pagosCreados = data.pagosCreados;
+    }
+
+    if (!devices.ASPIRADORA_001) {
+      devices.ASPIRADORA_001 = nuevoDevice();
+    }
+
     console.log("Datos EVETEC Timers cargados");
   } catch (err) {
     console.error("Error cargando datos:", err.message);
@@ -113,42 +181,71 @@ function cargarDatos() {
 cargarDatos();
 
 function asegurarDevice(deviceId) {
-  const id = String(deviceId || "ASPIRADORA_001").trim() || "ASPIRADORA_001";
-  if (!devices[id]) devices[id] = nuevoDevice();
+  const id = String(deviceId || "ASPIRADORA_001").trim().toUpperCase() || "ASPIRADORA_001";
+
+  if (!devices[id]) {
+    devices[id] = nuevoDevice();
+  }
 
   const d = devices[id];
+
   d.tipo = "aspiradora";
+
   if (typeof d.activo === "undefined") d.activo = true;
   if (typeof d.online === "undefined") d.online = false;
   if (typeof d.modoMantenimiento === "undefined") d.modoMantenimiento = false;
   if (typeof d.mensajeMantenimiento === "undefined") d.mensajeMantenimiento = "Equipo fuera de servicio por mantenimiento";
+
   if (typeof d.ownerLinked === "undefined") d.ownerLinked = false;
   if (typeof d.ownerAccessToken === "undefined") d.ownerAccessToken = null;
   if (typeof d.ownerRefreshToken === "undefined") d.ownerRefreshToken = null;
   if (typeof d.ownerUserId === "undefined") d.ownerUserId = null;
   if (typeof d.ownerEmail === "undefined") d.ownerEmail = "";
-  if (typeof d.comisionEvetecPorcentaje === "undefined") d.comisionEvetecPorcentaje = COMISION_EVETEC_PORCENTAJE;
-  if (!d.modoCobro) d.modoCobro = "owner_commission";
+
+  if (typeof d.comisionEvetecPorcentaje === "undefined") {
+    d.comisionEvetecPorcentaje = COMISION_EVETEC_PORCENTAJE;
+  }
+
+  if (!d.modoCobro) {
+    d.modoCobro = "owner_commission";
+  }
+
+  if (!d.stats) {
+    d.stats = statsIniciales();
+  }
+
+  if (!Array.isArray(d.stats.ultimosPagos)) {
+    d.stats.ultimosPagos = [];
+  }
 
   return d;
-}
-
-function escaparHtml(v) {
-  return String(v ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;");
 }
 
 function aplicarDescuento(monto, descuento) {
   return Math.max(1, Math.round(Number(monto) * (1 - Number(descuento) / 100)));
 }
 
+function formatoDinero(n) {
+  return Number(n || 0).toLocaleString("es-AR");
+}
+
+function formatoTiempo(segundos) {
+  segundos = Number(segundos || 0);
+
+  const h = Math.floor(segundos / 3600);
+  const m = Math.floor((segundos % 3600) / 60);
+  const s = segundos % 60;
+
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 function generarQRMatrix(texto) {
   const qr = QRCode.create(texto, { errorCorrectionLevel: "M" });
   const size = qr.modules.size;
   const data = qr.modules.data;
+
   let matrix = "";
 
   for (let y = 0; y < size; y++) {
@@ -157,7 +254,36 @@ function generarQRMatrix(texto) {
     }
   }
 
-  return { qr_size: size, qr_matrix: matrix };
+  return {
+    qr_size: size,
+    qr_matrix: matrix
+  };
+}
+
+function estadoOperativo(deviceId) {
+  const d = asegurarDevice(deviceId);
+
+  if (!configGlobal.activo) {
+    return {
+      ok: false,
+      motivo: "sistema_desactivado",
+      mensaje: "Sistema desactivado temporalmente"
+    };
+  }
+
+  if (!d.activo || d.modoMantenimiento) {
+    return {
+      ok: false,
+      motivo: "mantenimiento",
+      mensaje: d.mensajeMantenimiento || "Equipo en mantenimiento"
+    };
+  }
+
+  return {
+    ok: true,
+    motivo: "ok",
+    mensaje: "OK"
+  };
 }
 
 function obtenerTokenParaCobrar(deviceId) {
@@ -168,49 +294,69 @@ function obtenerTokenParaCobrar(deviceId) {
     d.ownerLinked &&
     d.ownerAccessToken
   ) {
-    return { token: d.ownerAccessToken, usandoOwner: true };
+    return {
+      token: d.ownerAccessToken,
+      usandoOwner: true
+    };
   }
 
-  return { token: EVETEC_MP_TOKEN, usandoOwner: false };
+  return {
+    token: EVETEC_MP_TOKEN,
+    usandoOwner: false
+  };
 }
 
 function calcularComision(deviceId, monto, usandoOwner) {
   const d = asegurarDevice(deviceId);
+
   if (!usandoOwner) return 0;
   if (d.modoCobro === "owner_direct") return 0;
 
   const porcentaje = Number(d.comisionEvetecPorcentaje || 0);
+
   return Math.max(0, Math.round(Number(monto) * porcentaje / 100));
 }
 
 function listaPlanesDisponibles() {
   const lista = [...configGlobal.planes];
-  if (configGlobal.promoGlobal?.activa) lista.push(configGlobal.promoGlobal);
+
+  if (configGlobal.promoGlobal && configGlobal.promoGlobal.activa) {
+    lista.push(configGlobal.promoGlobal);
+  }
+
   return lista;
 }
-
 function buscarPlan(body) {
-  const tipo = String(body.tipo || body.modo || body.planTipo || "normal").toLowerCase();
-  const planId = String(body.plan_id || body.planId || body.id || "").toUpperCase();
-  const segundos = Number(body.segundos || body.seconds || body.tiempo || 0);
+  const tipo = String(body.tipo || body.modo || "normal").toLowerCase();
+  const planId = String(body.plan_id || body.id || "").toUpperCase();
+  const segundos = Number(body.segundos || 0);
 
   let origen = "normal";
   let candidatos = listaPlanesDisponibles();
 
-  if (tipo.includes("extra") || tipo.includes("extension") || tipo.includes("extend")) {
+  if (tipo.includes("extra")) {
     origen = "extra";
     candidatos = configGlobal.preciosExtra;
   }
 
-  let plan = candidatos.find(p => String(p.id || "").toUpperCase() === planId);
-  if (!plan && segundos > 0) plan = candidatos.find(p => Number(p.segundos) === segundos);
-  if (!plan) plan = candidatos[0];
+  let plan = candidatos.find(p => String(p.id).toUpperCase() === planId);
 
-  return { ...plan, origen };
+  if (!plan && segundos > 0) {
+    plan = candidatos.find(p => Number(p.segundos) === segundos);
+  }
+
+  if (!plan) {
+    plan = candidatos[0];
+  }
+
+  return {
+    ...plan,
+    origen
+  };
 }
 
 function normalizarPedidoPago(body) {
-  const device_id = String(body.device_id || body.deviceId || "ASPIRADORA_001");
+  const device_id = String(body.device_id || "ASPIRADORA_001");
   const plan = buscarPlan(body);
 
   return {
@@ -223,21 +369,8 @@ function normalizarPedidoPago(body) {
   };
 }
 
-function estadoOperativo(deviceId) {
-  const d = asegurarDevice(deviceId);
-
-  if (!configGlobal.activo) {
-    return { ok: false, motivo: "sistema_desactivado", mensaje: "Sistema desactivado temporalmente" };
-  }
-
-  if (!d.activo || d.modoMantenimiento) {
-    return { ok: false, motivo: "mantenimiento", mensaje: d.mensajeMantenimiento || "Equipo en mantenimiento" };
-  }
-
-  return { ok: true, motivo: "ok", mensaje: "OK" };
-}
 // =====================================================
-// API PARA ESP32 TIMER / ASPIRADORA
+// API ESP32
 // =====================================================
 
 app.get("/config/:deviceId", (req, res) => {
@@ -246,6 +379,7 @@ app.get("/config/:deviceId", (req, res) => {
 
   d.online = true;
   d.ultimaConexion = new Date().toISOString();
+
   guardarDatos();
 
   const operativo = estadoOperativo(deviceId);
@@ -253,55 +387,225 @@ app.get("/config/:deviceId", (req, res) => {
   res.json({
     ok: true,
     activo: operativo.ok,
-    motivo: operativo.motivo,
-    tipo: "aspiradora",
-    device_id: deviceId,
-    mensaje: operativo.ok ? (configGlobal.mensajeGlobalActivo ? configGlobal.mensajeGlobal : "") : operativo.mensaje,
-    mensajeGlobal: {
-      activo: configGlobal.mensajeGlobalActivo,
-      texto: configGlobal.mensajeGlobal
-    },
+    mensaje: operativo.ok ? configGlobal.mensajeGlobal : operativo.mensaje,
+
     planes: configGlobal.planes,
     preciosExtra: configGlobal.preciosExtra,
     promoGlobal: configGlobal.promoGlobal.activa ? configGlobal.promoGlobal : null,
-    promoGlobalEspecial: configGlobal.promoGlobal.activa ? configGlobal.promoGlobal : null,
-    ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+
+    ownerLinked: d.ownerLinked,
     modoCobro: d.modoCobro,
-    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
-    mantenimiento: Boolean(d.modoMantenimiento),
-    serverTime: new Date().toISOString()
+    mantenimiento: d.modoMantenimiento
   });
 });
 
-app.post("/heartbeat", (req, res) => {
-  const deviceId = String(req.body.device_id || req.body.deviceId || "ASPIRADORA_001");
-  const d = asegurarDevice(deviceId);
+// =====================================================
+// 🔥 NUEVO: LOG DE PAGOS DESDE ESP32
+// =====================================================
 
-  d.online = true;
-  d.ultimaConexion = new Date().toISOString();
+app.post("/device/payment-log", (req, res) => {
+  try {
+    const { device_id, monto, segundos, fecha } = req.body;
+
+    const d = asegurarDevice(device_id);
+
+    d.stats.totalRecaudado += Number(monto || 0);
+    d.stats.pagosAprobados += 1;
+    d.stats.segundosVendidos += Number(segundos || 0);
+    d.stats.tiempoMotor += Number(segundos || 0);
+
+    d.stats.ultimosPagos.unshift({
+      monto,
+      segundos,
+      fecha: fecha || new Date().toISOString()
+    });
+
+    d.stats.ultimosPagos = d.stats.ultimosPagos.slice(0, 20);
+
+    guardarDatos();
+
+    console.log("PAGO LOG:", device_id, monto);
+
+    res.json({ ok: true });
+
+  } catch (err) {
+    console.error("Error payment-log:", err);
+    res.json({ ok: false });
+  }
+});
+
+// =====================================================
+// MERCADO PAGO - CREAR PAGO
+// =====================================================
+
+async function crearPagoMercadoPago(pedido) {
+  const d = asegurarDevice(pedido.device_id);
+  const operativo = estadoOperativo(pedido.device_id);
+
+  if (!operativo.ok) throw new Error(operativo.mensaje);
+
+  const { token, usandoOwner } = obtenerTokenParaCobrar(pedido.device_id);
+
+  if (!token) throw new Error("Falta token MP");
+
+  const external_reference = `${pedido.device_id}_${Date.now()}`;
+
+  const comision = calcularComision(pedido.device_id, pedido.monto, usandoOwner);
+
+  const body = {
+    items: [
+      {
+        title: `EVETEC ${pedido.device_id}`,
+        quantity: 1,
+        currency_id: "ARS",
+        unit_price: pedido.monto
+      }
+    ],
+    external_reference
+  };
+
+  if (comision > 0) {
+    body.marketplace_fee = comision;
+  }
+
+  const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await r.json();
+
+  if (!r.ok) {
+    console.error(data);
+    throw new Error("Error MP");
+  }
+
+  const link = data.init_point || data.sandbox_init_point;
+
+  pagosCreados[external_reference] = {
+    device_id: pedido.device_id,
+    monto: pedido.monto,
+    segundos: pedido.segundos,
+    estado: "pending"
+  };
+
   guardarDatos();
 
-  const operativo = estadoOperativo(deviceId);
+  return {
+    id: external_reference,
+    link
+  };
+}
 
-  res.json({
-    ok: true,
-    activo: operativo.ok,
-    motivo: operativo.motivo,
-    mensaje: operativo.mensaje
-  });
+app.post("/crear-pago", async (req, res) => {
+  try {
+    const pedido = normalizarPedidoPago(req.body);
+
+    const pago = await crearPagoMercadoPago(pedido);
+
+    const qr = generarQRMatrix(pago.link);
+
+    res.json({
+      ok: true,
+      payment_id: pago.id,
+      link: pago.link,
+      qr_size: qr.qr_size,
+      qr_matrix: qr.qr_matrix,
+      segundos: pedido.segundos
+    });
+
+  } catch (err) {
+    res.json({
+      ok: false,
+      error: err.message
+    });
+  }
 });
+// =====================================================
+// MERCADO PAGO - ESTADO DEL PAGO
+// =====================================================
 
-app.get("/owner-status/:deviceId", (req, res) => {
-  const d = asegurarDevice(req.params.deviceId);
+async function buscarEstadoMercadoPago(id) {
+  const pagoLocal = pagosCreados[id];
+  const deviceId = pagoLocal?.device_id;
 
-  res.json({
-    ok: true,
-    linked: Boolean(d.ownerLinked && d.ownerAccessToken),
-    ownerUserId: d.ownerUserId || null,
-    tipo: "aspiradora",
-    modoCobro: d.modoCobro,
-    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
-  });
+  const { token } = deviceId
+    ? obtenerTokenParaCobrar(deviceId)
+    : { token: EVETEC_MP_TOKEN };
+
+  if (!token) {
+    return {
+      estado: "pending",
+      detalle: "sin_token",
+      segundos: pagoLocal?.segundos || 0,
+      monto: pagoLocal?.monto || 0
+    };
+  }
+
+  try {
+    const url =
+      "https://api.mercadopago.com/v1/payments/search" +
+      `?external_reference=${encodeURIComponent(id)}` +
+      `&sort=date_created&criteria=desc`;
+
+    const r = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    const data = await r.json();
+
+    if (r.ok && Array.isArray(data.results) && data.results.length > 0) {
+      const pago = data.results[0];
+
+      const estado = pago.status || "pending";
+      const detalle = pago.status_detail || "";
+
+      if (pagoLocal) {
+        pagoLocal.estado = estado;
+        pagoLocal.payment_id = pago.id;
+        pagoLocal.detalle = detalle;
+        pagoLocal.actualizado = new Date().toISOString();
+        guardarDatos();
+      }
+
+      return {
+        estado,
+        detalle,
+        payment_id: pago.id,
+        segundos: pagoLocal?.segundos || 0,
+        monto: pagoLocal?.monto || 0
+      };
+    }
+  } catch (err) {
+    console.error("Error consultando pago:", err.message);
+  }
+
+  return {
+    estado: pagoLocal?.estado || "pending",
+    detalle: pagoLocal ? "esperando_pago" : "no_encontrado",
+    segundos: pagoLocal?.segundos || 0,
+    monto: pagoLocal?.monto || 0
+  };
+}
+
+app.get("/estado/:paymentId", async (req, res) => {
+  try {
+    const estado = await buscarEstadoMercadoPago(req.params.paymentId);
+    res.json(estado);
+  } catch (err) {
+    res.json({
+      estado: "pending",
+      detalle: "error_server",
+      segundos: 0,
+      monto: 0
+    });
+  }
 });
 
 // =====================================================
@@ -375,7 +679,6 @@ app.get("/oauth/callback", async (req, res) => {
     const data = await r.json();
 
     if (!r.ok) {
-      console.error("Error OAuth Mercado Pago:", data);
       return res.send(`
         <h2>EVETEC</h2>
         <p>Error vinculando cuenta Mercado Pago.</p>
@@ -409,8 +712,8 @@ app.get("/oauth/callback", async (req, res) => {
       </body>
       </html>
     `);
+
   } catch (err) {
-    console.error("Error /oauth/callback:", err);
     res.send(`
       <h2>EVETEC</h2>
       <p>Error interno vinculando cuenta.</p>
@@ -429,243 +732,24 @@ app.post("/unlink-owner/:deviceId", (req, res) => {
   d.ownerEmail = "";
 
   guardarDatos();
+
   res.redirect("/admin");
 });
 
-app.get("/unlink/:deviceId", (req, res) => {
+app.get("/owner-status/:deviceId", (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
-
-  d.ownerLinked = false;
-  d.ownerAccessToken = null;
-  d.ownerRefreshToken = null;
-  d.ownerUserId = null;
-  d.ownerEmail = "";
-
-  guardarDatos();
 
   res.json({
     ok: true,
-    linked: false,
-    message: "Cuenta desvinculada"
+    linked: Boolean(d.ownerLinked && d.ownerAccessToken),
+    ownerUserId: d.ownerUserId || null,
+    modoCobro: d.modoCobro,
+    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
   });
 });
 
 // =====================================================
-// MERCADO PAGO - CREAR Y CONSULTAR PAGO
-// =====================================================
-
-async function crearPagoMercadoPago(pedido) {
-  const d = asegurarDevice(pedido.device_id);
-  const operativo = estadoOperativo(pedido.device_id);
-
-  if (!operativo.ok) throw new Error(operativo.mensaje);
-
-  const { token, usandoOwner } = obtenerTokenParaCobrar(pedido.device_id);
-
-  if (!token) {
-    throw new Error("Falta token Mercado Pago. Vincule una cuenta o configure token EVETEC.");
-  }
-
-  if (!pedido.monto || pedido.monto <= 0) throw new Error("Monto inválido");
-  if (!pedido.segundos || pedido.segundos <= 0) throw new Error("Tiempo inválido");
-
-  const external_reference = `${pedido.device_id}_${pedido.origen || "normal"}_${Date.now()}`;
-  const comisionEvetec = calcularComision(pedido.device_id, pedido.monto, usandoOwner);
-  const netoDuenioEstimado = Math.max(0, Number(pedido.monto) - comisionEvetec);
-
-  const body = {
-    items: [
-      {
-        title: `EVETEC ${pedido.device_id} - ${pedido.plan_nombre || pedido.segundos + "s"}`,
-        quantity: 1,
-        currency_id: configGlobal.moneda || "ARS",
-        unit_price: Number(pedido.monto)
-      }
-    ],
-    external_reference,
-    metadata: {
-      device_id: pedido.device_id,
-      tipo: "aspiradora_timer",
-      origen: pedido.origen || "normal",
-      plan_id: pedido.plan_id || "",
-      plan_nombre: pedido.plan_nombre || "",
-      segundos: pedido.segundos,
-      monto_total: Number(pedido.monto),
-      comision_evetec: comisionEvetec,
-      neto_duenio_estimado: netoDuenioEstimado,
-      owner_linked: Boolean(d.ownerLinked),
-      modo_cobro: d.modoCobro
-    }
-  };
-
-  if (comisionEvetec > 0) {
-    body.marketplace_fee = comisionEvetec;
-  }
-
-  const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-
-  const data = await r.json();
-
-  if (!r.ok) {
-    console.error("Mercado Pago error:", data);
-    throw new Error(data.message || "Error creando pago Mercado Pago");
-  }
-
-  const link = data.init_point || data.sandbox_init_point;
-
-  if (!link) {
-    throw new Error("Mercado Pago no devolvió link de pago");
-  }
-
-  pagosCreados[external_reference] = {
-    preference_id: data.id,
-    external_reference,
-    device_id: pedido.device_id,
-    tipo: "aspiradora_timer",
-    origen: pedido.origen || "normal",
-    plan_id: pedido.plan_id || "",
-    plan_nombre: pedido.plan_nombre || "",
-    monto: pedido.monto,
-    segundos: pedido.segundos,
-    comisionEvetec,
-    netoDuenioEstimado,
-    estado: "pending",
-    link,
-    creado: new Date().toISOString()
-  };
-
-  if (data.id) {
-    pagosCreados[data.id] = pagosCreados[external_reference];
-  }
-
-  guardarDatos();
-
-  return {
-    id: external_reference,
-    preference_id: data.id,
-    external_reference,
-    link
-  };
-}
-
-app.post("/crear-pago", async (req, res) => {
-  try {
-    const pedido = normalizarPedidoPago(req.body);
-    const pago = await crearPagoMercadoPago(pedido);
-    const qr = generarQRMatrix(pago.link);
-
-    console.log("Pago timer creado:", pedido.device_id, pedido.origen, "$" + pedido.monto, pedido.segundos + "s");
-
-    res.json({
-      ok: true,
-      id: pago.id,
-      payment_id: pago.id,
-      preference_id: pago.preference_id,
-      external_reference: pago.external_reference,
-      link: pago.link,
-      qr_size: qr.qr_size,
-      qr_matrix: qr.qr_matrix,
-      segundos: pedido.segundos
-    });
-  } catch (err) {
-    console.error("Error /crear-pago:", err.message);
-
-    res.json({
-      ok: false,
-      error: err.message,
-      qr_size: 0,
-      qr_matrix: ""
-    });
-  }
-});
-async function buscarEstadoMercadoPago(id) {
-  const pagoLocal = pagosCreados[id];
-  const deviceId = pagoLocal?.device_id;
-
-  const { token } = deviceId
-    ? obtenerTokenParaCobrar(deviceId)
-    : { token: EVETEC_MP_TOKEN };
-
-  if (!token) {
-    return {
-      estado: "pending",
-      detalle: "sin_token",
-      segundos: pagoLocal?.segundos || 0
-    };
-  }
-
-  const externalRef = pagoLocal?.external_reference || id;
-
-  try {
-    const url =
-      "https://api.mercadopago.com/v1/payments/search" +
-      `?external_reference=${encodeURIComponent(externalRef)}` +
-      `&sort=date_created&criteria=desc`;
-
-    const r = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
-    });
-
-    const data = await r.json();
-
-    if (r.ok && Array.isArray(data.results) && data.results.length > 0) {
-      const pago = data.results[0];
-      const estado = pago.status || "pending";
-      const detalle = pago.status_detail || "";
-
-      if (pagoLocal) {
-        pagoLocal.estado = estado;
-        pagoLocal.payment_id = pago.id;
-        pagoLocal.detalle = detalle;
-        pagoLocal.actualizado = new Date().toISOString();
-        guardarDatos();
-      }
-
-      return {
-        estado,
-        detalle,
-        payment_id: pago.id,
-        segundos: pagoLocal?.segundos || pago.metadata?.segundos || 0,
-        origen: pagoLocal?.origen || pago.metadata?.origen || "normal"
-      };
-    }
-  } catch (err) {
-    console.error("Error consultando pago:", err.message);
-  }
-
-  return {
-    estado: pagoLocal?.estado || "pending",
-    detalle: pagoLocal ? "esperando_pago" : "no_encontrado",
-    segundos: pagoLocal?.segundos || 0,
-    origen: pagoLocal?.origen || "normal"
-  };
-}
-
-app.get("/estado/:paymentId", async (req, res) => {
-  try {
-    res.json(await buscarEstadoMercadoPago(req.params.paymentId));
-  } catch (err) {
-    console.error("Error /estado:", err.message);
-
-    res.json({
-      estado: "pending",
-      detalle: "error_server",
-      segundos: 0
-    });
-  }
-});
-
-// =====================================================
-// PANEL ADMIN
+// ADMIN
 // =====================================================
 
 app.get("/", (req, res) => {
@@ -698,7 +782,8 @@ app.get("/admin", (req, res) => {
       .bad{color:#ef4444;font-weight:bold}
       table{width:100%;border-collapse:collapse}
       td,th{border-bottom:1px solid #1f2937;padding:8px;text-align:left;vertical-align:middle}
-      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+      .money{font-size:22px;color:#22c55e;font-weight:bold}
     </style>
   </head>
   <body>
@@ -710,6 +795,43 @@ app.get("/admin", (req, res) => {
       MP_CLIENT_SECRET: <b class="${MP_CLIENT_SECRET ? "ok" : "bad"}">${MP_CLIENT_SECRET ? "OK" : "FALTA"}</b> |
       Token EVETEC: <b class="${EVETEC_MP_TOKEN ? "ok" : "bad"}">${EVETEC_MP_TOKEN ? "OK" : "FALTA"}</b>
     </p>
+  `;
+  html += `
+    <div class="box">
+      <h2>Recaudación por equipo</h2>
+      <table>
+        <tr>
+          <th>Equipo</th>
+          <th>Online</th>
+          <th>Recaudado</th>
+          <th>Pagos OK</th>
+          <th>Tiempo vendido</th>
+          <th>Último pago</th>
+        </tr>
+  `;
+
+  for (const id of Object.keys(devices).sort()) {
+    const d = asegurarDevice(id);
+    const stats = d.stats || statsIniciales();
+    const ultimo = stats.ultimosPagos && stats.ultimosPagos.length
+      ? stats.ultimosPagos[0]
+      : null;
+
+    html += `
+      <tr>
+        <td><b>${escaparHtml(id)}</b></td>
+        <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
+        <td class="money">$${formatoDinero(stats.totalRecaudado)}</td>
+        <td>${stats.pagosAprobados || 0}</td>
+        <td>${formatoTiempo(stats.segundosVendidos)}</td>
+        <td>${ultimo ? `$${formatoDinero(ultimo.monto)} - ${escaparHtml(new Date(ultimo.fecha).toLocaleString("es-AR"))}` : "Sin pagos"}</td>
+      </tr>
+    `;
+  }
+
+  html += `
+      </table>
+    </div>
 
     <div class="grid">
       <div class="box">
@@ -735,6 +857,7 @@ app.get("/admin", (req, res) => {
           <button class="promo" name="descuento" value="10">10% OFF</button>
           <button class="promo" name="descuento" value="5">5% OFF</button>
         </form>
+
         <form method="POST" action="/admin/reset-prices">
           <button class="danger" type="submit">Restaurar precios base</button>
         </form>
@@ -760,7 +883,7 @@ app.get("/admin", (req, res) => {
   });
 
   html += `
-      <button class="save" type="submit">Guardar precios principales</button>
+        <button class="save" type="submit">Guardar precios principales</button>
       </form>
     </div>
 
@@ -783,7 +906,7 @@ app.get("/admin", (req, res) => {
   });
 
   html += `
-      <button class="save" type="submit">Guardar precios extra</button>
+        <button class="save" type="submit">Guardar precios extra</button>
       </form>
     </div>
 
@@ -818,7 +941,9 @@ app.get("/admin", (req, res) => {
 
   for (const id of Object.keys(devices).sort()) {
     const d = asegurarDevice(id);
-    const last = d.ultimaConexion ? new Date(d.ultimaConexion).toLocaleString("es-AR") : "Nunca";
+    const last = d.ultimaConexion
+      ? new Date(d.ultimaConexion).toLocaleString("es-AR")
+      : "Nunca";
 
     html += `
       <tr>
@@ -827,32 +952,42 @@ app.get("/admin", (req, res) => {
         <td>${d.activo ? "SI" : "NO"}</td>
         <td>${d.modoMantenimiento ? "SI" : "NO"}</td>
         <td class="${d.ownerLinked ? "ok" : "bad"}">${d.ownerLinked ? "VINCULADA" : "NO VINCULADA"}</td>
+
         <td>
           <form method="POST" action="/admin/device/${encodeURIComponent(id)}/billing">
             <select name="modoCobro">
               <option value="owner_commission" ${d.modoCobro === "owner_commission" ? "selected" : ""}>Dueño + comisión</option>
-              <option value="owner_direct" ${d.modoCobro === "owner_direct" ? "selected" : ""}>Dueño directo sin comisión</option>
+              <option value="owner_direct" ${d.modoCobro === "owner_direct" ? "selected" : ""}>Dueño directo</option>
               <option value="evetec" ${d.modoCobro === "evetec" ? "selected" : ""}>Cuenta EVETEC</option>
             </select>
             <button class="save" type="submit">OK</button>
           </form>
         </td>
+
         <td>
           <form method="POST" action="/admin/device/${encodeURIComponent(id)}/commission">
             <input name="comision" value="${d.comisionEvetecPorcentaje}" size="4"> %
             <button class="save" type="submit">OK</button>
           </form>
         </td>
+
         <td>${escaparHtml(last)}</td>
+
         <td>
           <form method="POST" action="/admin/device/${encodeURIComponent(id)}/status">
             <input type="hidden" name="activo" value="${d.activo ? "0" : "1"}">
-            <button class="${d.activo ? "danger" : "save"}" type="submit">${d.activo ? "Dar de baja" : "Activar"}</button>
+            <button class="${d.activo ? "danger" : "save"}" type="submit">
+              ${d.activo ? "Dar baja" : "Activar"}
+            </button>
           </form>
+
           <form method="POST" action="/admin/device/${encodeURIComponent(id)}/maintenance">
             <input type="hidden" name="mantenimiento" value="${d.modoMantenimiento ? "0" : "1"}">
-            <button class="${d.modoMantenimiento ? "save" : "danger"}" type="submit">${d.modoMantenimiento ? "Quitar mant." : "Mantenimiento"}</button>
+            <button class="${d.modoMantenimiento ? "save" : "danger"}" type="submit">
+              ${d.modoMantenimiento ? "Quitar mant." : "Mantenimiento"}
+            </button>
           </form>
+
           <form method="POST" action="/unlink-owner/${encodeURIComponent(id)}">
             <button class="danger" type="submit">Desvincular MP</button>
           </form>
@@ -875,36 +1010,31 @@ app.get("/admin", (req, res) => {
     </div>
 
     <div class="box">
-      <h2>Últimos pagos</h2>
+      <h2>Últimos pagos globales</h2>
       <table>
         <tr>
           <th>Referencia</th>
           <th>Equipo</th>
-          <th>Tipo</th>
           <th>Monto</th>
           <th>Segundos</th>
-          <th>Comisión</th>
           <th>Estado</th>
-          <th>Fecha</th>
         </tr>
   `;
 
-  const pagos = Object.values(pagosCreados)
-    .filter((p, index, arr) => arr.findIndex(x => x.external_reference === p.external_reference) === index)
+  const pagos = Object.entries(pagosCreados)
+    .map(([ref, p]) => ({ ref, ...p }))
+    .filter((p, index, arr) => arr.findIndex(x => x.ref === p.ref) === index)
     .slice(-30)
     .reverse();
 
   for (const p of pagos) {
     html += `
       <tr>
-        <td>${escaparHtml(p.external_reference)}</td>
+        <td>${escaparHtml(p.ref)}</td>
         <td>${escaparHtml(p.device_id)}</td>
-        <td>${escaparHtml(p.origen || "normal")}</td>
-        <td>$${p.monto}</td>
-        <td>${p.segundos || 0}s</td>
-        <td>$${p.comisionEvetec || 0}</td>
+        <td>$${formatoDinero(p.monto)}</td>
+        <td>${formatoTiempo(p.segundos)}</td>
         <td>${escaparHtml(p.estado)}</td>
-        <td>${escaparHtml(p.creado ? new Date(p.creado).toLocaleString("es-AR") : "")}</td>
       </tr>
     `;
   }
@@ -912,12 +1042,17 @@ app.get("/admin", (req, res) => {
   html += `
       </table>
     </div>
+
   </body>
   </html>
   `;
 
   res.send(html);
 });
+
+// =====================================================
+// ACCIONES ADMIN
+// =====================================================
 
 app.post("/admin/global/update", (req, res) => {
   configGlobal.activo = req.body.activo === "on";
@@ -927,11 +1062,11 @@ app.post("/admin/global/update", (req, res) => {
   res.redirect("/admin");
 });
 
-function actualizarArrayPlanes(arr, body) {
+function actualizarArrayPlanes(arr, body, prefijo) {
   for (let i = 0; i < 3; i++) {
     if (!arr[i]) {
       arr[i] = {
-        id: `P${i + 1}`,
+        id: `${prefijo}${i + 1}`,
         nombre: `Plan ${i + 1}`,
         segundos: 60,
         monto: 100,
@@ -940,7 +1075,7 @@ function actualizarArrayPlanes(arr, body) {
       };
     }
 
-    arr[i].id = String(body[`id${i}`] || arr[i].id || `P${i + 1}`).toUpperCase();
+    arr[i].id = String(body[`id${i}`] || arr[i].id || `${prefijo}${i + 1}`).toUpperCase();
     arr[i].nombre = body[`nombre${i}`] || arr[i].nombre;
     arr[i].segundos = Number(body[`segundos${i}`]) || arr[i].segundos;
     arr[i].monto = Number(body[`monto${i}`]) || arr[i].monto;
@@ -950,13 +1085,13 @@ function actualizarArrayPlanes(arr, body) {
 }
 
 app.post("/admin/prices/update", (req, res) => {
-  actualizarArrayPlanes(configGlobal.planes, req.body);
+  actualizarArrayPlanes(configGlobal.planes, req.body, "P");
   guardarDatos();
   res.redirect("/admin");
 });
 
 app.post("/admin/extra-prices/update", (req, res) => {
-  actualizarArrayPlanes(configGlobal.preciosExtra, req.body);
+  actualizarArrayPlanes(configGlobal.preciosExtra, req.body, "E");
   guardarDatos();
   res.redirect("/admin");
 });
@@ -994,7 +1129,8 @@ app.post("/admin/reset-prices", (req, res) => {
     monto: p.montoBase || p.monto
   }));
 
-  configGlobal.promoGlobal.monto = configGlobal.promoGlobal.montoBase || configGlobal.promoGlobal.monto;
+  configGlobal.promoGlobal.monto =
+    configGlobal.promoGlobal.montoBase || configGlobal.promoGlobal.monto;
 
   configGlobal.mensajeGlobalActivo = true;
   configGlobal.mensajeGlobal = "Precios normales restaurados";
@@ -1005,12 +1141,14 @@ app.post("/admin/reset-prices", (req, res) => {
 
 app.post("/admin/promo/update", (req, res) => {
   configGlobal.promoGlobal.activa = req.body.activa === "on";
-  configGlobal.promoGlobal.id = String(req.body.id || configGlobal.promoGlobal.id || "PROMO").toUpperCase();
+  configGlobal.promoGlobal.id = String(req.body.id || "PROMO").toUpperCase();
   configGlobal.promoGlobal.nombre = req.body.nombre || configGlobal.promoGlobal.nombre;
   configGlobal.promoGlobal.segundos = Number(req.body.segundos) || configGlobal.promoGlobal.segundos;
   configGlobal.promoGlobal.monto = Number(req.body.monto) || configGlobal.promoGlobal.monto;
-  configGlobal.promoGlobal.montoBase = configGlobal.promoGlobal.montoBase || configGlobal.promoGlobal.monto;
-  configGlobal.promoGlobal.descripcion = req.body.descripcion || configGlobal.promoGlobal.descripcion;
+  configGlobal.promoGlobal.montoBase =
+    configGlobal.promoGlobal.montoBase || configGlobal.promoGlobal.monto;
+  configGlobal.promoGlobal.descripcion =
+    req.body.descripcion || configGlobal.promoGlobal.descripcion;
 
   guardarDatos();
   res.redirect("/admin");
@@ -1079,13 +1217,13 @@ app.post("/admin/device/:deviceId/billing", (req, res) => {
 });
 
 // =====================================================
-// STATUS / HEALTH
+// HEALTH
 // =====================================================
 
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    server: "EVETEC_TIMERS_FINAL",
+    server: "EVETEC_TIMERS_FINAL_STATS",
     publicBaseUrl: PUBLIC_BASE_URL,
     redirectUri: REDIRECT_URI,
     mpClientId: Boolean(MP_CLIENT_ID),
@@ -1095,6 +1233,10 @@ app.get("/health", (req, res) => {
     devices
   });
 });
+
+// =====================================================
+// ONLINE CHECK
+// =====================================================
 
 setInterval(() => {
   const ahora = Date.now();
@@ -1111,9 +1253,13 @@ setInterval(() => {
   }
 }, 5000);
 
+// =====================================================
+// START
+// =====================================================
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log("=======================================");
-  console.log(" EVETEC SERVER FINAL - TIMERS");
+  console.log(" EVETEC SERVER FINAL - TIMERS + STATS");
   console.log("=======================================");
   console.log(`Servidor local: http://localhost:${PORT}`);
   console.log(`URL pública: ${PUBLIC_BASE_URL}`);
