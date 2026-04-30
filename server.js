@@ -507,16 +507,14 @@ app.post("/crear-pago", async (req, res) => {
 
     const pago = await crearPagoMercadoPago(pedido);
 
-    const qr = generarQRMatrix(pago.link);
+res.json({
+  ok: true,
+  payment_id: pago.id,
+  link: pago.link,
+  segundos: pedido.segundos,
+  monto: pedido.monto
+});
 
-    res.json({
-      ok: true,
-      payment_id: pago.id,
-      link: pago.link,
-      qr_size: qr.qr_size,
-      qr_matrix: qr.qr_matrix,
-      segundos: pedido.segundos
-    });
 
   } catch (err) {
     res.json({
