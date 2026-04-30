@@ -1,19 +1,26 @@
 {
-  "name": "evetec-qr-mercadopago",
+  "name": "evetec-timers",
   "version": "1.0.0",
-  "description": "Servidor Mercado Pago para ESP32 EVETEC",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
-    "dotenv": "^16.6.1",
     "express": "^4.22.1",
     "qrcode": "^1.5.4"
+  },
+  "description": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wolferinezz10-sketch/evetec-api.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs"
+  "bugs": {
+    "url": "https://github.com/wolferinezz10-sketch/evetec-api/issues"
+  },
+  "homepage": "https://github.com/wolferinezz10-sketch/evetec-api#readme"
 }
