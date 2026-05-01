@@ -20,35 +20,6 @@ const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
 const DATA_FILE = process.env.DATA_FILE || "evetec-timers-data.json";
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
 
-let configGlobal = {
-  activo: true,
-  mensajeGlobalActivo: true,
-  mensajeGlobal: "Sistema EVETEC listo para usar",
-  moneda: "ARS",
-
-  planes: [
-    { id: "P1", nombre: "1m 30s", segundos: 90, monto: 100, montoBase: 100, descripcion: "Limpieza rápida" },
-    { id: "P2", nombre: "3m", segundos: 180, monto: 250, montoBase: 250, descripcion: "Auto chico / retoque" },
-    { id: "P3", nombre: "5m", segundos: 300, monto: 400, montoBase: 400, descripcion: "Limpieza completa" }
-  ],
-
-  preciosExtra: [
-    { id: "E1", nombre: "+30s", segundos: 30, monto: 50, montoBase: 50, descripcion: "Tiempo extra corto" },
-    { id: "E2", nombre: "+1m", segundos: 60, monto: 90, montoBase: 90, descripcion: "Tiempo extra" },
-    { id: "E3", nombre: "+2m", segundos: 120, monto: 160, montoBase: 160, descripcion: "Tiempo extra extendido" }
-  ],
-
-  promoGlobal: {
-    activa: false,
-    id: "PROMO",
-    nombre: "PROMO GLOBAL",
-    segundos: 240,
-    monto: 300,
-    montoBase: 300,
-    descripcion: "Promo especial EVETEC"
-  }
-};
-
 function statsIniciales() {
   return {
     totalRecaudado: 0,
@@ -59,9 +30,47 @@ function statsIniciales() {
   };
 }
 
-function nuevoDevice() {
+let configGlobal = {
+  activo: true,
+  mensajeGlobalActivo: true,
+  mensajeGlobal: "Sistema listo para usar",
+  moneda: "ARS",
+
+  premium: {
+    planes: [
+      { id: "P1", nombre: "1m 30s", segundos: 90, monto: 100, montoBase: 100, descripcion: "Limpieza rápida" },
+      { id: "P2", nombre: "3m", segundos: 180, monto: 250, montoBase: 250, descripcion: "Auto chico / retoque" },
+      { id: "P3", nombre: "5m", segundos: 300, monto: 400, montoBase: 400, descripcion: "Limpieza completa" }
+    ],
+    preciosExtra: [
+      { id: "E1", nombre: "+30s", segundos: 30, monto: 50, montoBase: 50, descripcion: "Tiempo extra corto" },
+      { id: "E2", nombre: "+1m", segundos: 60, monto: 90, montoBase: 90, descripcion: "Tiempo extra" },
+      { id: "E3", nombre: "+2m", segundos: 120, monto: 160, montoBase: 160, descripcion: "Tiempo extra extendido" }
+    ],
+    promoGlobal: {
+      activa: false,
+      id: "PROMO",
+      nombre: "PROMO GLOBAL",
+      segundos: 240,
+      monto: 300,
+      montoBase: 300,
+      descripcion: "Promo especial"
+    }
+  },
+
+  basic: {
+    activo: true,
+    nombre: "Uso básico",
+    segundos: 30,
+    monto: 100,
+    montoBase: 100,
+    descripcion: "Sistema básico QR fijo"
+  }
+};
+
+function nuevoDevice(tipo = "premium") {
   return {
-    tipo: "aspiradora",
+    tipo,
     activo: true,
     online: false,
     modoMantenimiento: false,
@@ -82,8 +91,9 @@ function nuevoDevice() {
 }
 
 let devices = {
-  ASPIRADORA_001: nuevoDevice(),
-  ASPIRADORA_002: nuevoDevice()
+  ASPIRADORA_001: nuevoDevice("premium"),
+  ASPIRADORA_002: nuevoDevice("premium"),
+  ASPIRADORA_BASIC_001: nuevoDevice("basic")
 };
 
 let pagosCreados = {};
@@ -94,6 +104,31 @@ function escaparHtml(v) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/\"/g, "&quot;");
+}
+
+function formatoDinero(n) {
+  return Number(n || 0).toLocaleString("es-AR");
+}
+
+function formatoTiempo(segundos) {
+  segundos = Number(segundos || 0);
+  const h = Math.floor(segundos / 3600);
+  const m = Math.floor((segundos % 3600) / 60);
+  const s = segundos % 60;
+
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function detectarTipoDevice(deviceId) {
+  const id = String(deviceId || "").toUpperCase();
+
+  if (id.includes("BASIC") || id.includes("SIMPLE") || id.includes("BASICO")) {
+    return "basic";
+  }
+
+  return "premium";
 }
 
 function limpiarDevicesMigrados(obj) {
@@ -112,38 +147,52 @@ function limpiarDevicesMigrados(obj) {
   return limpio;
 }
 
-function unirConfig(base, saved) {
-  const result = { ...base, ...saved };
+function asegurarEstructuraConfig() {
+  if (!configGlobal.premium) {
+    configGlobal.premium = {
+      planes: configGlobal.planes || [
+        { id: "P1", nombre: "1m 30s", segundos: 90, monto: 100, montoBase: 100, descripcion: "Limpieza rápida" },
+        { id: "P2", nombre: "3m", segundos: 180, monto: 250, montoBase: 250, descripcion: "Auto chico / retoque" },
+        { id: "P3", nombre: "5m", segundos: 300, monto: 400, montoBase: 400, descripcion: "Limpieza completa" }
+      ],
+      preciosExtra: configGlobal.preciosExtra || [
+        { id: "E1", nombre: "+30s", segundos: 30, monto: 50, montoBase: 50, descripcion: "Tiempo extra corto" },
+        { id: "E2", nombre: "+1m", segundos: 60, monto: 90, montoBase: 90, descripcion: "Tiempo extra" },
+        { id: "E3", nombre: "+2m", segundos: 120, monto: 160, montoBase: 160, descripcion: "Tiempo extra extendido" }
+      ],
+      promoGlobal: configGlobal.promoGlobal || {
+        activa: false,
+        id: "PROMO",
+        nombre: "PROMO GLOBAL",
+        segundos: 240,
+        monto: 300,
+        montoBase: 300,
+        descripcion: "Promo especial"
+      }
+    };
+  }
 
-  result.planes = Array.isArray(saved.planes)
-    ? saved.planes.slice(0, 3)
-    : base.planes;
+  if (!configGlobal.basic) {
+    configGlobal.basic = {
+      activo: true,
+      nombre: "Uso básico",
+      segundos: 30,
+      monto: 100,
+      montoBase: 100,
+      descripcion: "Sistema básico QR fijo"
+    };
+  }
 
-  result.preciosExtra = Array.isArray(saved.preciosExtra)
-    ? saved.preciosExtra.slice(0, 3)
-    : base.preciosExtra;
-
-  result.promoGlobal = {
-    ...base.promoGlobal,
-    ...(saved.promoGlobal || {})
-  };
-
-  return result;
+  delete configGlobal.planes;
+  delete configGlobal.preciosExtra;
+  delete configGlobal.promoGlobal;
 }
 
 function guardarDatos() {
   try {
     fs.writeFileSync(
       DATA_FILE,
-      JSON.stringify(
-        {
-          devices,
-          pagosCreados,
-          configGlobal
-        },
-        null,
-        2
-      )
+      JSON.stringify({ devices, pagosCreados, configGlobal }, null, 2)
     );
   } catch (err) {
     console.error("Error guardando datos:", err.message);
@@ -157,7 +206,8 @@ function cargarDatos() {
     const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
 
     if (data.configGlobal) {
-      configGlobal = unirConfig(configGlobal, data.configGlobal);
+      configGlobal = { ...configGlobal, ...data.configGlobal };
+      asegurarEstructuraConfig();
     }
 
     if (data.devices) {
@@ -168,29 +218,29 @@ function cargarDatos() {
       pagosCreados = data.pagosCreados;
     }
 
-    if (!devices.ASPIRADORA_001) {
-      devices.ASPIRADORA_001 = nuevoDevice();
-    }
+    if (!devices.ASPIRADORA_001) devices.ASPIRADORA_001 = nuevoDevice("premium");
+    if (!devices.ASPIRADORA_BASIC_001) devices.ASPIRADORA_BASIC_001 = nuevoDevice("basic");
 
-    console.log("Datos EVETEC Timers cargados");
+    console.log("Datos EVETEC cargados");
   } catch (err) {
     console.error("Error cargando datos:", err.message);
   }
 }
 
+asegurarEstructuraConfig();
 cargarDatos();
+asegurarEstructuraConfig();
 
 function asegurarDevice(deviceId) {
   const id = String(deviceId || "ASPIRADORA_001").trim().toUpperCase() || "ASPIRADORA_001";
 
   if (!devices[id]) {
-    devices[id] = nuevoDevice();
+    devices[id] = nuevoDevice(detectarTipoDevice(id));
   }
 
   const d = devices[id];
 
-  d.tipo = "aspiradora";
-
+  if (!d.tipo) d.tipo = detectarTipoDevice(id);
   if (typeof d.activo === "undefined") d.activo = true;
   if (typeof d.online === "undefined") d.online = false;
   if (typeof d.modoMantenimiento === "undefined") d.modoMantenimiento = false;
@@ -206,39 +256,14 @@ function asegurarDevice(deviceId) {
     d.comisionEvetecPorcentaje = COMISION_EVETEC_PORCENTAJE;
   }
 
-  if (!d.modoCobro) {
-    d.modoCobro = "owner_commission";
-  }
-
-  if (!d.stats) {
-    d.stats = statsIniciales();
-  }
-
-  if (!Array.isArray(d.stats.ultimosPagos)) {
-    d.stats.ultimosPagos = [];
-  }
+  if (!d.modoCobro) d.modoCobro = "owner_commission";
+  if (!d.stats) d.stats = statsIniciales();
+  if (!Array.isArray(d.stats.ultimosPagos)) d.stats.ultimosPagos = [];
 
   return d;
 }
-
 function aplicarDescuento(monto, descuento) {
   return Math.max(1, Math.round(Number(monto) * (1 - Number(descuento) / 100)));
-}
-
-function formatoDinero(n) {
-  return Number(n || 0).toLocaleString("es-AR");
-}
-
-function formatoTiempo(segundos) {
-  segundos = Number(segundos || 0);
-
-  const h = Math.floor(segundos / 3600);
-  const m = Math.floor((segundos % 3600) / 60);
-  const s = segundos % 60;
-
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
 }
 
 function generarQRMatrix(texto) {
@@ -276,6 +301,14 @@ function estadoOperativo(deviceId) {
       ok: false,
       motivo: "mantenimiento",
       mensaje: d.mensajeMantenimiento || "Equipo en mantenimiento"
+    };
+  }
+
+  if (d.tipo === "basic" && !configGlobal.basic.activo) {
+    return {
+      ok: false,
+      motivo: "basic_desactivado",
+      mensaje: "Sistema básico desactivado temporalmente"
     };
   }
 
@@ -317,26 +350,27 @@ function calcularComision(deviceId, monto, usandoOwner) {
   return Math.max(0, Math.round(Number(monto) * porcentaje / 100));
 }
 
-function listaPlanesDisponibles() {
-  const lista = [...configGlobal.planes];
+function listaPlanesPremium() {
+  const lista = [...configGlobal.premium.planes];
 
-  if (configGlobal.promoGlobal && configGlobal.promoGlobal.activa) {
-    lista.push(configGlobal.promoGlobal);
+  if (configGlobal.premium.promoGlobal && configGlobal.premium.promoGlobal.activa) {
+    lista.push(configGlobal.premium.promoGlobal);
   }
 
   return lista;
 }
-function buscarPlan(body) {
+
+function buscarPlanPremium(body) {
   const tipo = String(body.tipo || body.modo || "normal").toLowerCase();
   const planId = String(body.plan_id || body.id || "").toUpperCase();
   const segundos = Number(body.segundos || 0);
 
   let origen = "normal";
-  let candidatos = listaPlanesDisponibles();
+  let candidatos = listaPlanesPremium();
 
   if (tipo.includes("extra")) {
     origen = "extra";
-    candidatos = configGlobal.preciosExtra;
+    candidatos = configGlobal.premium.preciosExtra;
   }
 
   let plan = candidatos.find(p => String(p.id).toUpperCase() === planId);
@@ -356,11 +390,26 @@ function buscarPlan(body) {
 }
 
 function normalizarPedidoPago(body) {
-  const device_id = String(body.device_id || "ASPIRADORA_001");
-  const plan = buscarPlan(body);
+  const device_id = String(body.device_id || body.deviceId || "ASPIRADORA_001").toUpperCase();
+  const d = asegurarDevice(device_id);
+
+  if (d.tipo === "basic") {
+    return {
+      device_id,
+      modoSistema: "basic",
+      plan_id: "BASIC",
+      plan_nombre: configGlobal.basic.nombre || "Uso básico",
+      origen: "basic",
+      monto: Number(configGlobal.basic.monto),
+      segundos: Number(configGlobal.basic.segundos)
+    };
+  }
+
+  const plan = buscarPlanPremium(body);
 
   return {
     device_id,
+    modoSistema: "premium",
     plan_id: plan.id,
     plan_nombre: plan.nombre,
     origen: plan.origen,
@@ -370,11 +419,63 @@ function normalizarPedidoPago(body) {
 }
 
 // =====================================================
-// API ESP32
+// API ESP32 CONFIG
 // =====================================================
 
 app.get("/config/:deviceId", (req, res) => {
-  const deviceId = req.params.deviceId;
+  const deviceId = String(req.params.deviceId || "ASPIRADORA_001").toUpperCase();
+  const d = asegurarDevice(deviceId);
+
+  d.online = true;
+  d.ultimaConexion = new Date().toISOString();
+
+  guardarDatos();
+
+  const operativo = estadoOperativo(deviceId);
+
+  if (d.tipo === "basic") {
+    return res.json({
+      ok: true,
+      tipo: "basic",
+      activo: operativo.ok,
+      motivo: operativo.motivo,
+      mensaje: operativo.ok ? configGlobal.mensajeGlobal : operativo.mensaje,
+      precio: Number(configGlobal.basic.monto),
+      monto: Number(configGlobal.basic.monto),
+      segundos: Number(configGlobal.basic.segundos),
+      nombre: configGlobal.basic.nombre,
+      descripcion: configGlobal.basic.descripcion,
+      ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      modoCobro: d.modoCobro,
+      mantenimiento: d.modoMantenimiento,
+      serverTime: new Date().toISOString()
+    });
+  }
+
+  res.json({
+    ok: true,
+    tipo: "premium",
+    activo: operativo.ok,
+    motivo: operativo.motivo,
+    mensaje: operativo.ok ? configGlobal.mensajeGlobal : operativo.mensaje,
+    mensajeGlobal: {
+      activo: configGlobal.mensajeGlobalActivo,
+      texto: configGlobal.mensajeGlobal
+    },
+    planes: configGlobal.premium.planes,
+    preciosExtra: configGlobal.premium.preciosExtra,
+    promoGlobal: configGlobal.premium.promoGlobal.activa ? configGlobal.premium.promoGlobal : null,
+    promoGlobalEspecial: configGlobal.premium.promoGlobal.activa ? configGlobal.premium.promoGlobal : null,
+    ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+    modoCobro: d.modoCobro,
+    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
+    mantenimiento: Boolean(d.modoMantenimiento),
+    serverTime: new Date().toISOString()
+  });
+});
+
+app.post("/heartbeat", (req, res) => {
+  const deviceId = String(req.body.device_id || req.body.deviceId || "ASPIRADORA_001").toUpperCase();
   const d = asegurarDevice(deviceId);
 
   d.online = true;
@@ -387,53 +488,56 @@ app.get("/config/:deviceId", (req, res) => {
   res.json({
     ok: true,
     activo: operativo.ok,
-    mensaje: operativo.ok ? configGlobal.mensajeGlobal : operativo.mensaje,
-
-    planes: configGlobal.planes,
-    preciosExtra: configGlobal.preciosExtra,
-    promoGlobal: configGlobal.promoGlobal.activa ? configGlobal.promoGlobal : null,
-
-    ownerLinked: d.ownerLinked,
-    modoCobro: d.modoCobro,
-    mantenimiento: d.modoMantenimiento
+    motivo: operativo.motivo,
+    mensaje: operativo.mensaje,
+    tipo: d.tipo
   });
 });
 
 // =====================================================
-// 🔥 NUEVO: LOG DE PAGOS DESDE ESP32
+// LOG DE PAGOS DESDE ESP32
 // =====================================================
 
 app.post("/device/payment-log", (req, res) => {
   try {
-    const { device_id, monto, segundos, fecha } = req.body;
+    const device_id = String(req.body.device_id || req.body.deviceId || "ASPIRADORA_001").toUpperCase();
+    const monto = Number(req.body.monto || 0);
+    const segundos = Number(req.body.segundos || 0);
+    const fecha = req.body.fecha || new Date().toISOString();
 
     const d = asegurarDevice(device_id);
 
-    d.stats.totalRecaudado += Number(monto || 0);
+    d.stats.totalRecaudado += monto;
     d.stats.pagosAprobados += 1;
-    d.stats.segundosVendidos += Number(segundos || 0);
-    d.stats.tiempoMotor += Number(segundos || 0);
+    d.stats.segundosVendidos += segundos;
+    d.stats.tiempoMotor += segundos;
 
     d.stats.ultimosPagos.unshift({
       monto,
       segundos,
-      fecha: fecha || new Date().toISOString()
+      fecha,
+      tipo: d.tipo
     });
 
-    d.stats.ultimosPagos = d.stats.ultimosPagos.slice(0, 20);
+    d.stats.ultimosPagos = d.stats.ultimosPagos.slice(0, 30);
 
     guardarDatos();
 
-    console.log("PAGO LOG:", device_id, monto);
+    console.log("PAGO LOG:", device_id, "$" + monto, segundos + "s");
 
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      stats: d.stats
+    });
 
   } catch (err) {
-    console.error("Error payment-log:", err);
-    res.json({ ok: false });
+    console.error("Error payment-log:", err.message);
+    res.json({
+      ok: false,
+      error: err.message
+    });
   }
 });
-
 // =====================================================
 // MERCADO PAGO - CREAR PAGO
 // =====================================================
@@ -442,26 +546,51 @@ async function crearPagoMercadoPago(pedido) {
   const d = asegurarDevice(pedido.device_id);
   const operativo = estadoOperativo(pedido.device_id);
 
-  if (!operativo.ok) throw new Error(operativo.mensaje);
+  if (!operativo.ok) {
+    throw new Error(operativo.mensaje);
+  }
 
   const { token, usandoOwner } = obtenerTokenParaCobrar(pedido.device_id);
 
-  if (!token) throw new Error("Falta token MP");
+  if (!token) {
+    throw new Error("Falta token Mercado Pago");
+  }
 
-  const external_reference = `${pedido.device_id}_${Date.now()}`;
+  if (!pedido.monto || pedido.monto <= 0) {
+    throw new Error("Monto inválido");
+  }
 
+  if (!pedido.segundos || pedido.segundos <= 0) {
+    throw new Error("Tiempo inválido");
+  }
+
+  const external_reference = `${pedido.device_id}_${pedido.modoSistema}_${Date.now()}`;
   const comision = calcularComision(pedido.device_id, pedido.monto, usandoOwner);
+  const netoDuenioEstimado = Math.max(0, Number(pedido.monto) - comision);
 
   const body = {
     items: [
       {
-        title: `EVETEC ${pedido.device_id}`,
+        title: `${pedido.plan_nombre} - ${pedido.device_id}`,
         quantity: 1,
-        currency_id: "ARS",
-        unit_price: pedido.monto
+        currency_id: configGlobal.moneda || "ARS",
+        unit_price: Number(pedido.monto)
       }
     ],
-    external_reference
+    external_reference,
+    metadata: {
+      device_id: pedido.device_id,
+      tipo: pedido.modoSistema,
+      plan_id: pedido.plan_id,
+      plan_nombre: pedido.plan_nombre,
+      origen: pedido.origen,
+      segundos: pedido.segundos,
+      monto_total: pedido.monto,
+      comision_evetec: comision,
+      neto_duenio_estimado: netoDuenioEstimado,
+      modo_cobro: d.modoCobro,
+      owner_linked: Boolean(d.ownerLinked)
+    }
   };
 
   if (comision > 0) {
@@ -480,49 +609,107 @@ async function crearPagoMercadoPago(pedido) {
   const data = await r.json();
 
   if (!r.ok) {
-    console.error(data);
-    throw new Error("Error MP");
+    console.error("Mercado Pago error:", data);
+    throw new Error(data.message || "Error creando pago Mercado Pago");
   }
 
   const link = data.init_point || data.sandbox_init_point;
 
+  if (!link) {
+    throw new Error("Mercado Pago no devolvió link de pago");
+  }
+
   pagosCreados[external_reference] = {
+    preference_id: data.id,
+    external_reference,
     device_id: pedido.device_id,
+    tipo: pedido.modoSistema,
+    origen: pedido.origen,
+    plan_id: pedido.plan_id,
+    plan_nombre: pedido.plan_nombre,
     monto: pedido.monto,
     segundos: pedido.segundos,
-    estado: "pending"
+    comisionEvetec: comision,
+    netoDuenioEstimado,
+    estado: "pending",
+    link,
+    creado: new Date().toISOString()
   };
+
+  if (data.id) {
+    pagosCreados[data.id] = pagosCreados[external_reference];
+  }
 
   guardarDatos();
 
   return {
     id: external_reference,
-    link
+    preference_id: data.id,
+    external_reference,
+    link,
+    monto: pedido.monto,
+    segundos: pedido.segundos
   };
 }
 
 app.post("/crear-pago", async (req, res) => {
   try {
     const pedido = normalizarPedidoPago(req.body);
-
     const pago = await crearPagoMercadoPago(pedido);
 
-res.json({
-  ok: true,
-  payment_id: pago.id,
-  link: pago.link,
-  segundos: pedido.segundos,
-  monto: pedido.monto
-});
-
+    // Respuesta liviana: el ESP32 genera el QR local desde el link.
+    res.json({
+      ok: true,
+      payment_id: pago.id,
+      id: pago.id,
+      preference_id: pago.preference_id,
+      external_reference: pago.external_reference,
+      link: pago.link,
+      monto: pago.monto,
+      segundos: pago.segundos,
+      tipo: pedido.modoSistema
+    });
 
   } catch (err) {
+    console.error("Error /crear-pago:", err.message);
+
     res.json({
       ok: false,
       error: err.message
     });
   }
 });
+
+// Alias por compatibilidad para equipos básicos
+app.post("/basic/crear-pago", async (req, res) => {
+  req.body.device_id = req.body.device_id || req.body.deviceId || "ASPIRADORA_BASIC_001";
+
+  try {
+    const pedido = normalizarPedidoPago(req.body);
+    const pago = await crearPagoMercadoPago(pedido);
+
+    res.json({
+      ok: true,
+      payment_id: pago.id,
+      id: pago.id,
+      preference_id: pago.preference_id,
+      external_reference: pago.external_reference,
+      link: pago.link,
+      monto: pago.monto,
+      segundos: pago.segundos,
+      tipo: pedido.modoSistema
+    });
+
+  } catch (err) {
+    console.error("Error /basic/crear-pago:", err.message);
+
+    res.json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
 // =====================================================
 // MERCADO PAGO - ESTADO DEL PAGO
 // =====================================================
@@ -538,16 +725,20 @@ async function buscarEstadoMercadoPago(id) {
   if (!token) {
     return {
       estado: "pending",
+      status: "pending",
       detalle: "sin_token",
       segundos: pagoLocal?.segundos || 0,
-      monto: pagoLocal?.monto || 0
+      monto: pagoLocal?.monto || 0,
+      tipo: pagoLocal?.tipo || "unknown"
     };
   }
+
+  const externalRef = pagoLocal?.external_reference || id;
 
   try {
     const url =
       "https://api.mercadopago.com/v1/payments/search" +
-      `?external_reference=${encodeURIComponent(id)}` +
+      `?external_reference=${encodeURIComponent(externalRef)}` +
       `&sort=date_created&criteria=desc`;
 
     const r = await fetch(url, {
@@ -574,10 +765,12 @@ async function buscarEstadoMercadoPago(id) {
 
       return {
         estado,
+        status: estado,
         detalle,
         payment_id: pago.id,
-        segundos: pagoLocal?.segundos || 0,
-        monto: pagoLocal?.monto || 0
+        segundos: pagoLocal?.segundos || pago.metadata?.segundos || 0,
+        monto: pagoLocal?.monto || pago.metadata?.monto_total || 0,
+        tipo: pagoLocal?.tipo || pago.metadata?.tipo || "unknown"
       };
     }
   } catch (err) {
@@ -586,9 +779,11 @@ async function buscarEstadoMercadoPago(id) {
 
   return {
     estado: pagoLocal?.estado || "pending",
+    status: pagoLocal?.estado || "pending",
     detalle: pagoLocal ? "esperando_pago" : "no_encontrado",
     segundos: pagoLocal?.segundos || 0,
-    monto: pagoLocal?.monto || 0
+    monto: pagoLocal?.monto || 0,
+    tipo: pagoLocal?.tipo || "unknown"
   };
 }
 
@@ -597,8 +792,42 @@ app.get("/estado/:paymentId", async (req, res) => {
     const estado = await buscarEstadoMercadoPago(req.params.paymentId);
     res.json(estado);
   } catch (err) {
+    console.error("Error /estado:", err.message);
+
     res.json({
       estado: "pending",
+      status: "pending",
+      detalle: "error_server",
+      segundos: 0,
+      monto: 0
+    });
+  }
+});
+
+// Alias para INO básico si consulta por query
+app.get("/estado-pago", async (req, res) => {
+  try {
+    const id = req.query.id || req.query.payment_id || req.query.paymentId;
+
+    if (!id) {
+      return res.json({
+        estado: "pending",
+        status: "pending",
+        detalle: "sin_id",
+        segundos: 0,
+        monto: 0
+      });
+    }
+
+    const estado = await buscarEstadoMercadoPago(id);
+    res.json(estado);
+
+  } catch (err) {
+    console.error("Error /estado-pago:", err.message);
+
+    res.json({
+      estado: "pending",
+      status: "pending",
       detalle: "error_server",
       segundos: 0,
       monto: 0
@@ -612,7 +841,7 @@ app.get("/estado/:paymentId", async (req, res) => {
 
 app.get("/oauth/link/:deviceId", (req, res) => {
   try {
-    const deviceId = req.params.deviceId;
+    const deviceId = String(req.params.deviceId || "").toUpperCase();
     asegurarDevice(deviceId);
 
     if (!MP_CLIENT_ID) {
@@ -651,10 +880,10 @@ app.get("/oauth/link/:deviceId", (req, res) => {
 
 app.get("/oauth/callback", async (req, res) => {
   const code = req.query.code;
-  const deviceId = req.query.state;
+  const deviceId = String(req.query.state || "").toUpperCase();
 
   if (!code || !deviceId) {
-    return res.send("<h2>EVETEC</h2><p>Faltan datos de autorización.</p>");
+    return res.send("<h2>Sistema</h2><p>Faltan datos de autorización.</p>");
   }
 
   try {
@@ -677,8 +906,10 @@ app.get("/oauth/callback", async (req, res) => {
     const data = await r.json();
 
     if (!r.ok) {
+      console.error("Error OAuth Mercado Pago:", data);
+
       return res.send(`
-        <h2>EVETEC</h2>
+        <h2>Sistema</h2>
         <p>Error vinculando cuenta Mercado Pago.</p>
         <pre>${escaparHtml(JSON.stringify(data, null, 2))}</pre>
       `);
@@ -712,8 +943,10 @@ app.get("/oauth/callback", async (req, res) => {
     `);
 
   } catch (err) {
+    console.error("Error /oauth/callback:", err);
+
     res.send(`
-      <h2>EVETEC</h2>
+      <h2>Sistema</h2>
       <p>Error interno vinculando cuenta.</p>
       <pre>${escaparHtml(err.message)}</pre>
     `);
@@ -741,11 +974,11 @@ app.get("/owner-status/:deviceId", (req, res) => {
     ok: true,
     linked: Boolean(d.ownerLinked && d.ownerAccessToken),
     ownerUserId: d.ownerUserId || null,
+    tipo: d.tipo,
     modoCobro: d.modoCobro,
     comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
   });
 });
-
 // =====================================================
 // ADMIN
 // =====================================================
@@ -760,7 +993,7 @@ app.get("/admin", (req, res) => {
   <html>
   <head>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>EVETEC Timers Admin</title>
+    <title>Panel Timers Vending</title>
     <style>
       body{font-family:Arial;background:#050816;color:white;padding:20px}
       h1{color:#22d3ee;margin-bottom:4px}
@@ -776,30 +1009,32 @@ app.get("/admin", (req, res) => {
       .offline{color:#ef4444;font-weight:bold}
       .small{color:#94a3b8;font-size:13px}
       .tag{display:inline-block;background:#0f172a;color:#67e8f9;border:1px solid #155e75;border-radius:999px;padding:4px 10px;font-size:12px}
+      .basic{color:#60a5fa;font-weight:bold}
+      .premium{color:#c084fc;font-weight:bold}
       .ok{color:#22c55e;font-weight:bold}
       .bad{color:#ef4444;font-weight:bold}
       table{width:100%;border-collapse:collapse}
       td,th{border-bottom:1px solid #1f2937;padding:8px;text-align:left;vertical-align:middle}
       .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
-      .money{font-size:22px;color:#22c55e;font-weight:bold}
+      .money{font-size:20px;color:#22c55e;font-weight:bold}
     </style>
   </head>
   <body>
-    <h1>EVETEC PANEL TIMERS / ASPIRADORAS</h1>
+    <h1>PANEL SISTEMA VENDING / TIMERS</h1>
     <p class="small">Base pública: ${escaparHtml(PUBLIC_BASE_URL)}</p>
     <p class="small">Redirect OAuth: ${escaparHtml(REDIRECT_URI)}</p>
     <p class="small">
       MP_CLIENT_ID: <b class="${MP_CLIENT_ID ? "ok" : "bad"}">${MP_CLIENT_ID ? "OK" : "FALTA"}</b> |
       MP_CLIENT_SECRET: <b class="${MP_CLIENT_SECRET ? "ok" : "bad"}">${MP_CLIENT_SECRET ? "OK" : "FALTA"}</b> |
-      Token EVETEC: <b class="${EVETEC_MP_TOKEN ? "ok" : "bad"}">${EVETEC_MP_TOKEN ? "OK" : "FALTA"}</b>
+      Token fallback: <b class="${EVETEC_MP_TOKEN ? "ok" : "bad"}">${EVETEC_MP_TOKEN ? "OK" : "FALTA"}</b>
     </p>
-  `;
-  html += `
+
     <div class="box">
       <h2>Recaudación por equipo</h2>
       <table>
         <tr>
           <th>Equipo</th>
+          <th>Tipo</th>
           <th>Online</th>
           <th>Recaudado</th>
           <th>Pagos OK</th>
@@ -811,13 +1046,12 @@ app.get("/admin", (req, res) => {
   for (const id of Object.keys(devices).sort()) {
     const d = asegurarDevice(id);
     const stats = d.stats || statsIniciales();
-    const ultimo = stats.ultimosPagos && stats.ultimosPagos.length
-      ? stats.ultimosPagos[0]
-      : null;
+    const ultimo = stats.ultimosPagos && stats.ultimosPagos.length ? stats.ultimosPagos[0] : null;
 
     html += `
       <tr>
         <td><b>${escaparHtml(id)}</b></td>
+        <td class="${d.tipo === "basic" ? "basic" : "premium"}">${d.tipo === "basic" ? "BÁSICO" : "PREMIUM"}</td>
         <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
         <td class="money">$${formatoDinero(stats.totalRecaudado)}</td>
         <td>${stats.pagosAprobados || 0}</td>
@@ -840,34 +1074,35 @@ app.get("/admin", (req, res) => {
           Mensaje activo:
           <input type="checkbox" name="mensajeGlobalActivo" ${configGlobal.mensajeGlobalActivo ? "checked" : ""}><br>
           Mensaje:<br>
-          <input name="mensajeGlobal" value="${escaparHtml(configGlobal.mensajeGlobal)}" size="45"><br>
-          <button class="save" type="submit">Guardar estado general</button>
+          <input name="mensajeGlobal" value="${escaparHtml(configGlobal.mensajeGlobal)}" size="42"><br>
+          <button class="save" type="submit">Guardar estado</button>
         </form>
       </div>
 
       <div class="box">
-        <h2>Descuentos rápidos</h2>
-        <form method="POST" action="/admin/discount">
-          <button class="promo" name="descuento" value="50">50% OFF</button>
-          <button class="promo" name="descuento" value="40">40% OFF</button>
-          <button class="promo" name="descuento" value="30">30% OFF</button>
-          <button class="promo" name="descuento" value="20">20% OFF</button>
-          <button class="promo" name="descuento" value="10">10% OFF</button>
-          <button class="promo" name="descuento" value="5">5% OFF</button>
-        </form>
-
-        <form method="POST" action="/admin/reset-prices">
-          <button class="danger" type="submit">Restaurar precios base</button>
+        <h2>Sistema básico QR fijo</h2>
+        <form method="POST" action="/admin/basic/update">
+          Activo:
+          <input type="checkbox" name="activo" ${configGlobal.basic.activo ? "checked" : ""}><br>
+          Nombre:
+          <input name="nombre" value="${escaparHtml(configGlobal.basic.nombre)}" size="18"><br>
+          Precio:
+          <input name="monto" value="${configGlobal.basic.monto}" size="8">
+          Segundos:
+          <input name="segundos" value="${configGlobal.basic.segundos}" size="8"><br>
+          Descripción:
+          <input name="descripcion" value="${escaparHtml(configGlobal.basic.descripcion)}" size="42"><br>
+          <button class="save" type="submit">Guardar básico</button>
         </form>
       </div>
     </div>
 
     <div class="box">
-      <h2>3 precios principales</h2>
-      <form method="POST" action="/admin/prices/update">
+      <h2>Premium: 3 precios principales</h2>
+      <form method="POST" action="/admin/premium/prices/update">
   `;
 
-  configGlobal.planes.forEach((p, i) => {
+  configGlobal.premium.planes.forEach((p, i) => {
     html += `
       <div>
         <b>Plan ${i + 1}</b>
@@ -875,22 +1110,22 @@ app.get("/admin", (req, res) => {
         Nombre:<input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="12">
         Seg:<input name="segundos${i}" value="${p.segundos}" size="6">
         Precio:<input name="monto${i}" value="${p.monto}" size="7">
-        Desc:<input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="28">
+        Desc:<input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="26">
       </div>
     `;
   });
 
   html += `
-        <button class="save" type="submit">Guardar precios principales</button>
+        <button class="save" type="submit">Guardar precios premium</button>
       </form>
     </div>
 
     <div class="box">
-      <h2>3 precios extra post-tiempo</h2>
-      <form method="POST" action="/admin/extra-prices/update">
+      <h2>Premium: 3 precios extra post-tiempo</h2>
+      <form method="POST" action="/admin/premium/extra-prices/update">
   `;
 
-  configGlobal.preciosExtra.forEach((p, i) => {
+  configGlobal.premium.preciosExtra.forEach((p, i) => {
     html += `
       <div>
         <b>Extra ${i + 1}</b>
@@ -898,26 +1133,42 @@ app.get("/admin", (req, res) => {
         Nombre:<input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="12">
         Seg:<input name="segundos${i}" value="${p.segundos}" size="6">
         Precio:<input name="monto${i}" value="${p.monto}" size="7">
-        Desc:<input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="28">
+        Desc:<input name="descripcion${i}" value="${escaparHtml(p.descripcion)}" size="26">
       </div>
     `;
   });
 
   html += `
-        <button class="save" type="submit">Guardar precios extra</button>
+        <button class="save" type="submit">Guardar extras premium</button>
       </form>
     </div>
 
     <div class="box">
-      <h2>4° precio / promo opcional</h2>
-      <form method="POST" action="/admin/promo/update">
-        Activa:<input type="checkbox" name="activa" ${configGlobal.promoGlobal.activa ? "checked" : ""}><br>
-        ID:<input name="id" value="${escaparHtml(configGlobal.promoGlobal.id || "PROMO")}" size="8">
-        Nombre:<input name="nombre" value="${escaparHtml(configGlobal.promoGlobal.nombre)}" size="20"><br>
-        Duración:<input name="segundos" value="${configGlobal.promoGlobal.segundos}" size="8"> segundos
-        Precio:<input name="monto" value="${configGlobal.promoGlobal.monto}" size="8"><br>
-        Descripción:<input name="descripcion" value="${escaparHtml(configGlobal.promoGlobal.descripcion)}" size="50"><br>
-        <button class="save" type="submit">Guardar promo</button>
+      <h2>Premium: 4° precio / promo opcional</h2>
+      <form method="POST" action="/admin/premium/promo/update">
+        Activa:<input type="checkbox" name="activa" ${configGlobal.premium.promoGlobal.activa ? "checked" : ""}><br>
+        ID:<input name="id" value="${escaparHtml(configGlobal.premium.promoGlobal.id || "PROMO")}" size="8">
+        Nombre:<input name="nombre" value="${escaparHtml(configGlobal.premium.promoGlobal.nombre)}" size="20"><br>
+        Duración:<input name="segundos" value="${configGlobal.premium.promoGlobal.segundos}" size="8"> segundos
+        Precio:<input name="monto" value="${configGlobal.premium.promoGlobal.monto}" size="8"><br>
+        Descripción:<input name="descripcion" value="${escaparHtml(configGlobal.premium.promoGlobal.descripcion)}" size="42"><br>
+        <button class="save" type="submit">Guardar promo premium</button>
+      </form>
+    </div>
+
+    <div class="box">
+      <h2>Descuentos rápidos Premium</h2>
+      <form method="POST" action="/admin/premium/discount">
+        <button class="promo" name="descuento" value="50">50% OFF</button>
+        <button class="promo" name="descuento" value="40">40% OFF</button>
+        <button class="promo" name="descuento" value="30">30% OFF</button>
+        <button class="promo" name="descuento" value="20">20% OFF</button>
+        <button class="promo" name="descuento" value="10">10% OFF</button>
+        <button class="promo" name="descuento" value="5">5% OFF</button>
+      </form>
+
+      <form method="POST" action="/admin/premium/reset-prices">
+        <button class="danger" type="submit">Restaurar precios base premium</button>
       </form>
     </div>
 
@@ -926,6 +1177,7 @@ app.get("/admin", (req, res) => {
       <table>
         <tr>
           <th>Equipo</th>
+          <th>Tipo</th>
           <th>Online</th>
           <th>Activo</th>
           <th>Mantenimiento</th>
@@ -939,13 +1191,12 @@ app.get("/admin", (req, res) => {
 
   for (const id of Object.keys(devices).sort()) {
     const d = asegurarDevice(id);
-    const last = d.ultimaConexion
-      ? new Date(d.ultimaConexion).toLocaleString("es-AR")
-      : "Nunca";
+    const last = d.ultimaConexion ? new Date(d.ultimaConexion).toLocaleString("es-AR") : "Nunca";
 
     html += `
       <tr>
-        <td><b>${escaparHtml(id)}</b><br><span class="tag">aspiradora</span></td>
+        <td><b>${escaparHtml(id)}</b></td>
+        <td class="${d.tipo === "basic" ? "basic" : "premium"}">${d.tipo === "basic" ? "BÁSICO" : "PREMIUM"}</td>
         <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
         <td>${d.activo ? "SI" : "NO"}</td>
         <td>${d.modoMantenimiento ? "SI" : "NO"}</td>
@@ -956,7 +1207,7 @@ app.get("/admin", (req, res) => {
             <select name="modoCobro">
               <option value="owner_commission" ${d.modoCobro === "owner_commission" ? "selected" : ""}>Dueño + comisión</option>
               <option value="owner_direct" ${d.modoCobro === "owner_direct" ? "selected" : ""}>Dueño directo</option>
-              <option value="evetec" ${d.modoCobro === "evetec" ? "selected" : ""}>Cuenta EVETEC</option>
+              <option value="evetec" ${d.modoCobro === "evetec" ? "selected" : ""}>Cuenta fallback</option>
             </select>
             <button class="save" type="submit">OK</button>
           </form>
@@ -1002,7 +1253,12 @@ app.get("/admin", (req, res) => {
       <h2>Agregar equipo</h2>
       <form method="POST" action="/admin/device/add">
         ID equipo:
-        <input name="deviceId" value="ASPIRADORA_003" size="24">
+        <input name="deviceId" value="ASPIRADORA_BASIC_002" size="24">
+        Tipo:
+        <select name="tipo">
+          <option value="basic">Básico</option>
+          <option value="premium">Premium</option>
+        </select>
         <button class="save" type="submit">Agregar</button>
       </form>
     </div>
@@ -1013,23 +1269,24 @@ app.get("/admin", (req, res) => {
         <tr>
           <th>Referencia</th>
           <th>Equipo</th>
+          <th>Tipo</th>
           <th>Monto</th>
           <th>Segundos</th>
           <th>Estado</th>
         </tr>
   `;
 
-  const pagos = Object.entries(pagosCreados)
-    .map(([ref, p]) => ({ ref, ...p }))
-    .filter((p, index, arr) => arr.findIndex(x => x.ref === p.ref) === index)
+  const pagos = Object.values(pagosCreados)
+    .filter((p, index, arr) => arr.findIndex(x => x.external_reference === p.external_reference) === index)
     .slice(-30)
     .reverse();
 
   for (const p of pagos) {
     html += `
       <tr>
-        <td>${escaparHtml(p.ref)}</td>
+        <td>${escaparHtml(p.external_reference)}</td>
         <td>${escaparHtml(p.device_id)}</td>
+        <td>${escaparHtml(p.tipo || "")}</td>
         <td>$${formatoDinero(p.monto)}</td>
         <td>${formatoTiempo(p.segundos)}</td>
         <td>${escaparHtml(p.estado)}</td>
@@ -1060,6 +1317,17 @@ app.post("/admin/global/update", (req, res) => {
   res.redirect("/admin");
 });
 
+app.post("/admin/basic/update", (req, res) => {
+  configGlobal.basic.activo = req.body.activo === "on";
+  configGlobal.basic.nombre = req.body.nombre || configGlobal.basic.nombre;
+  configGlobal.basic.monto = Number(req.body.monto) || configGlobal.basic.monto;
+  configGlobal.basic.segundos = Number(req.body.segundos) || configGlobal.basic.segundos;
+  configGlobal.basic.descripcion = req.body.descripcion || configGlobal.basic.descripcion;
+  configGlobal.basic.montoBase = configGlobal.basic.montoBase || configGlobal.basic.monto;
+  guardarDatos();
+  res.redirect("/admin");
+});
+
 function actualizarArrayPlanes(arr, body, prefijo) {
   for (let i = 0; i < 3; i++) {
     if (!arr[i]) {
@@ -1082,71 +1350,68 @@ function actualizarArrayPlanes(arr, body, prefijo) {
   }
 }
 
-app.post("/admin/prices/update", (req, res) => {
-  actualizarArrayPlanes(configGlobal.planes, req.body, "P");
+app.post("/admin/premium/prices/update", (req, res) => {
+  actualizarArrayPlanes(configGlobal.premium.planes, req.body, "P");
   guardarDatos();
   res.redirect("/admin");
 });
 
-app.post("/admin/extra-prices/update", (req, res) => {
-  actualizarArrayPlanes(configGlobal.preciosExtra, req.body, "E");
+app.post("/admin/premium/extra-prices/update", (req, res) => {
+  actualizarArrayPlanes(configGlobal.premium.preciosExtra, req.body, "E");
   guardarDatos();
   res.redirect("/admin");
 });
 
-app.post("/admin/discount", (req, res) => {
+app.post("/admin/premium/promo/update", (req, res) => {
+  configGlobal.premium.promoGlobal.activa = req.body.activa === "on";
+  configGlobal.premium.promoGlobal.id = String(req.body.id || "PROMO").toUpperCase();
+  configGlobal.premium.promoGlobal.nombre = req.body.nombre || configGlobal.premium.promoGlobal.nombre;
+  configGlobal.premium.promoGlobal.segundos = Number(req.body.segundos) || configGlobal.premium.promoGlobal.segundos;
+  configGlobal.premium.promoGlobal.monto = Number(req.body.monto) || configGlobal.premium.promoGlobal.monto;
+  configGlobal.premium.promoGlobal.montoBase = configGlobal.premium.promoGlobal.montoBase || configGlobal.premium.promoGlobal.monto;
+  configGlobal.premium.promoGlobal.descripcion = req.body.descripcion || configGlobal.premium.promoGlobal.descripcion;
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/premium/discount", (req, res) => {
   const descuento = Number(req.body.descuento) || 0;
 
-  configGlobal.planes = configGlobal.planes.map(p => ({
+  configGlobal.premium.planes = configGlobal.premium.planes.map(p => ({
     ...p,
     montoBase: p.montoBase || p.monto,
     monto: aplicarDescuento(p.montoBase || p.monto, descuento)
   }));
 
-  configGlobal.preciosExtra = configGlobal.preciosExtra.map(p => ({
+  configGlobal.premium.preciosExtra = configGlobal.premium.preciosExtra.map(p => ({
     ...p,
     montoBase: p.montoBase || p.monto,
     monto: aplicarDescuento(p.montoBase || p.monto, descuento)
   }));
 
   configGlobal.mensajeGlobalActivo = true;
-  configGlobal.mensajeGlobal = `Promoción global aplicada: ${descuento}% OFF`;
+  configGlobal.mensajeGlobal = `Promoción premium aplicada: ${descuento}% OFF`;
 
   guardarDatos();
   res.redirect("/admin");
 });
 
-app.post("/admin/reset-prices", (req, res) => {
-  configGlobal.planes = configGlobal.planes.map(p => ({
+app.post("/admin/premium/reset-prices", (req, res) => {
+  configGlobal.premium.planes = configGlobal.premium.planes.map(p => ({
     ...p,
     monto: p.montoBase || p.monto
   }));
 
-  configGlobal.preciosExtra = configGlobal.preciosExtra.map(p => ({
+  configGlobal.premium.preciosExtra = configGlobal.premium.preciosExtra.map(p => ({
     ...p,
     monto: p.montoBase || p.monto
   }));
 
-  configGlobal.promoGlobal.monto =
-    configGlobal.promoGlobal.montoBase || configGlobal.promoGlobal.monto;
+  configGlobal.premium.promoGlobal.monto =
+    configGlobal.premium.promoGlobal.montoBase || configGlobal.premium.promoGlobal.monto;
 
   configGlobal.mensajeGlobalActivo = true;
-  configGlobal.mensajeGlobal = "Precios normales restaurados";
-
-  guardarDatos();
-  res.redirect("/admin");
-});
-
-app.post("/admin/promo/update", (req, res) => {
-  configGlobal.promoGlobal.activa = req.body.activa === "on";
-  configGlobal.promoGlobal.id = String(req.body.id || "PROMO").toUpperCase();
-  configGlobal.promoGlobal.nombre = req.body.nombre || configGlobal.promoGlobal.nombre;
-  configGlobal.promoGlobal.segundos = Number(req.body.segundos) || configGlobal.promoGlobal.segundos;
-  configGlobal.promoGlobal.monto = Number(req.body.monto) || configGlobal.promoGlobal.monto;
-  configGlobal.promoGlobal.montoBase =
-    configGlobal.promoGlobal.montoBase || configGlobal.promoGlobal.monto;
-  configGlobal.promoGlobal.descripcion =
-    req.body.descripcion || configGlobal.promoGlobal.descripcion;
+  configGlobal.mensajeGlobal = "Precios premium restaurados";
 
   guardarDatos();
   res.redirect("/admin");
@@ -1154,9 +1419,10 @@ app.post("/admin/promo/update", (req, res) => {
 
 app.post("/admin/device/add", (req, res) => {
   const id = String(req.body.deviceId || "").trim().toUpperCase();
+  const tipo = String(req.body.tipo || detectarTipoDevice(id)).toLowerCase();
 
   if (id) {
-    asegurarDevice(id);
+    devices[id] = nuevoDevice(tipo === "basic" ? "basic" : "premium");
   }
 
   guardarDatos();
@@ -1165,33 +1431,22 @@ app.post("/admin/device/add", (req, res) => {
 
 app.post("/admin/device/:deviceId/status", (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
-
   d.activo = req.body.activo === "1";
-
-  if (d.activo) {
-    d.modoMantenimiento = false;
-  }
-
+  if (d.activo) d.modoMantenimiento = false;
   guardarDatos();
   res.redirect("/admin");
 });
 
 app.post("/admin/device/:deviceId/maintenance", (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
-
   d.modoMantenimiento = req.body.mantenimiento === "1";
-
-  if (d.modoMantenimiento) {
-    d.activo = false;
-  }
-
+  if (d.modoMantenimiento) d.activo = false;
   guardarDatos();
   res.redirect("/admin");
 });
 
 app.post("/admin/device/:deviceId/commission", (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
-
   d.comisionEvetecPorcentaje = Number(req.body.comision);
 
   if (!Number.isFinite(d.comisionEvetecPorcentaje)) {
@@ -1221,7 +1476,7 @@ app.post("/admin/device/:deviceId/billing", (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    server: "EVETEC_TIMERS_FINAL_STATS",
+    server: "DUAL_TIMERS_PREMIUM_BASIC",
     publicBaseUrl: PUBLIC_BASE_URL,
     redirectUri: REDIRECT_URI,
     mpClientId: Boolean(MP_CLIENT_ID),
@@ -1257,7 +1512,7 @@ setInterval(() => {
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log("=======================================");
-  console.log(" EVETEC SERVER FINAL - TIMERS + STATS");
+  console.log(" SERVER DUAL - PREMIUM + BASIC");
   console.log("=======================================");
   console.log(`Servidor local: http://localhost:${PORT}`);
   console.log(`URL pública: ${PUBLIC_BASE_URL}`);
