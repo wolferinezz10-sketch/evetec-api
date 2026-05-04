@@ -26,6 +26,8 @@ function statsIniciales() {
     pagosAprobados: 0,
     segundosVendidos: 0,
     tiempoMotor: 0,
+    creditosVendidos: 0,
+    motorMsVendidos: 0,
     ultimosPagos: []
   };
 }
@@ -65,6 +67,21 @@ let configGlobal = {
     monto: 100,
     montoBase: 100,
     descripcion: "Sistema básico QR fijo"
+  },
+
+  gachapon: {
+    activo: true,
+    nombre: "Gachapon",
+    titulo: "GACHAPON",
+    mensaje: "Tu sorpresa te espera",
+    instruccion: "Toca una opcion",
+    pulso_motor_ms: 10000,
+    pausa_premios_ms: 650,
+    planes: [
+      { id: "G1", creditos: 1, nombre: "1 CREDITO", etiqueta: "Elegir y pagar", monto: 1000, montoBase: 1000, giro_ms: 10000, descripcion: "Un premio" },
+      { id: "G2", creditos: 2, nombre: "2 CREDITOS", etiqueta: "Promo 5% OFF", monto: 1800, montoBase: 1800, giro_ms: 20000, descripcion: "Dos premios" },
+      { id: "G3", creditos: 3, nombre: "3 CREDITOS", etiqueta: "Mejor valor", monto: 2500, montoBase: 2500, giro_ms: 30000, descripcion: "Tres premios" }
+    ]
   }
 };
 
@@ -123,6 +140,10 @@ function formatoTiempo(segundos) {
 
 function detectarTipoDevice(deviceId) {
   const id = String(deviceId || "").toUpperCase();
+
+  if (id.includes("GACHAPON") || id.includes("GACHA")) {
+    return "gachapon";
+  }
 
   if (id.includes("BASIC") || id.includes("SIMPLE") || id.includes("BASICO")) {
     return "basic";
@@ -183,6 +204,39 @@ function asegurarEstructuraConfig() {
     };
   }
 
+  if (!configGlobal.gachapon) {
+    configGlobal.gachapon = {
+      activo: true,
+      nombre: "Gachapon",
+      titulo: "GACHAPON",
+      mensaje: "Tu sorpresa te espera",
+      instruccion: "Toca una opcion",
+      pulso_motor_ms: 10000,
+      pausa_premios_ms: 650,
+      planes: [
+        { id: "G1", creditos: 1, nombre: "1 CREDITO", etiqueta: "Elegir y pagar", monto: 1000, montoBase: 1000, giro_ms: 10000, descripcion: "Un premio" },
+        { id: "G2", creditos: 2, nombre: "2 CREDITOS", etiqueta: "Promo 5% OFF", monto: 1800, montoBase: 1800, giro_ms: 20000, descripcion: "Dos premios" },
+        { id: "G3", creditos: 3, nombre: "3 CREDITOS", etiqueta: "Mejor valor", monto: 2500, montoBase: 2500, giro_ms: 30000, descripcion: "Tres premios" }
+      ]
+    };
+  }
+
+  if (!Array.isArray(configGlobal.gachapon.planes)) configGlobal.gachapon.planes = [];
+  for (let i = 0; i < 3; i++) {
+    if (!configGlobal.gachapon.planes[i]) {
+      configGlobal.gachapon.planes[i] = { id: `G${i + 1}`, creditos: i + 1, nombre: `${i + 1} CREDITO`, etiqueta: "Elegir", monto: 1000 * (i + 1), montoBase: 1000 * (i + 1), giro_ms: 10000 * (i + 1), descripcion: "" };
+    }
+    const gp = configGlobal.gachapon.planes[i];
+    if (!gp.id) gp.id = `G${i + 1}`;
+    if (!gp.creditos) gp.creditos = i + 1;
+    if (!gp.nombre) gp.nombre = `${gp.creditos} CREDITO${gp.creditos > 1 ? "S" : ""}`;
+    if (!gp.etiqueta) gp.etiqueta = "Elegir y pagar";
+    if (!gp.monto) gp.monto = 1000 * (i + 1);
+    if (!gp.montoBase) gp.montoBase = gp.monto;
+    if (!gp.giro_ms) gp.giro_ms = 10000 * (i + 1);
+    if (typeof gp.descripcion === "undefined") gp.descripcion = "";
+  }
+
   delete configGlobal.planes;
   delete configGlobal.preciosExtra;
   delete configGlobal.promoGlobal;
@@ -220,6 +274,7 @@ function cargarDatos() {
 
     if (!devices.ASPIRADORA_001) devices.ASPIRADORA_001 = nuevoDevice("premium");
     if (!devices.ASPIRADORA_BASIC_001) devices.ASPIRADORA_BASIC_001 = nuevoDevice("basic");
+    if (!devices.GACHAPON_001) devices.GACHAPON_001 = nuevoDevice("gachapon");
 
     console.log("Datos EVETEC cargados");
   } catch (err) {
@@ -230,6 +285,8 @@ function cargarDatos() {
 asegurarEstructuraConfig();
 cargarDatos();
 asegurarEstructuraConfig();
+if (!devices.GACHAPON_001) devices.GACHAPON_001 = nuevoDevice("gachapon");
+asegurarDevice("GACHAPON_001");
 
 function asegurarDevice(deviceId) {
   const id = String(deviceId || "ASPIRADORA_001").trim().toUpperCase() || "ASPIRADORA_001";
@@ -312,6 +369,14 @@ function estadoOperativo(deviceId) {
     };
   }
 
+  if (d.tipo === "gachapon" && !configGlobal.gachapon.activo) {
+    return {
+      ok: false,
+      motivo: "gachapon_desactivado",
+      mensaje: "Gachapon desactivado temporalmente"
+    };
+  }
+
   return {
     ok: true,
     motivo: "ok",
@@ -389,9 +454,53 @@ function buscarPlanPremium(body) {
   };
 }
 
+function buscarPlanGachapon(body) {
+  const planes = configGlobal.gachapon.planes || [];
+  const planIndexRaw = body.plan_index ?? body.planIndex;
+  const planIndex = Number(planIndexRaw);
+  const planId = String(body.plan_id || body.id || "").toUpperCase();
+  const creditos = Number(body.creditos || 0);
+
+  let plan = null;
+
+  if (Number.isFinite(planIndex) && planIndex >= 0 && planIndex < planes.length) {
+    plan = planes[planIndex];
+  }
+
+  if (!plan && planId) {
+    plan = planes.find(p => String(p.id || "").toUpperCase() === planId);
+  }
+
+  if (!plan && creditos > 0) {
+    plan = planes.find(p => Number(p.creditos) === creditos);
+  }
+
+  if (!plan) plan = planes[0];
+
+  return { ...plan };
+}
+
 function normalizarPedidoPago(body) {
   const device_id = String(body.device_id || body.deviceId || "ASPIRADORA_001").toUpperCase();
   const d = asegurarDevice(device_id);
+
+  if (d.tipo === "gachapon" || String(body.tipo || body.modo || "").toLowerCase().includes("gachapon")) {
+    const plan = buscarPlanGachapon(body);
+    const giroMs = Math.max(500, Math.min(120000, Number(plan.giro_ms || plan.motor_ms || plan.tiempo_giro_ms || 10000)));
+
+    return {
+      device_id,
+      modoSistema: "gachapon",
+      plan_id: plan.id || `G${plan.creditos || 1}`,
+      plan_nombre: plan.nombre || `${plan.creditos || 1} CREDITO`,
+      origen: "gachapon",
+      monto: Number(plan.monto || plan.precio || body.monto || 1000),
+      segundos: Math.max(1, Math.ceil(giroMs / 1000)),
+      motor_ms: giroMs,
+      creditos: Number(plan.creditos || body.creditos || 1),
+      etiqueta: plan.etiqueta || ""
+    };
+  }
 
   if (d.tipo === "basic") {
     return {
@@ -432,6 +541,48 @@ app.get("/config/:deviceId", (req, res) => {
   guardarDatos();
 
   const operativo = estadoOperativo(deviceId);
+
+  if (d.tipo === "gachapon") {
+    const g = configGlobal.gachapon;
+    return res.json({
+      ok: true,
+      tipo: "gachapon",
+      activo: operativo.ok,
+      motivo: operativo.motivo,
+      mantenimiento: Boolean(d.modoMantenimiento),
+      mensaje: operativo.ok ? (g.mensaje || configGlobal.mensajeGlobal) : operativo.mensaje,
+      nombre: g.nombre || "Gachapon",
+      titulo: g.titulo || "GACHAPON",
+      instruccion: g.instruccion || "Toca una opcion",
+      pulso_motor_ms: Number(g.pulso_motor_ms || 10000),
+      pausa_premios_ms: Number(g.pausa_premios_ms || 650),
+      giro1_ms: Number(g.planes?.[0]?.giro_ms || 10000),
+      giro2_ms: Number(g.planes?.[1]?.giro_ms || 20000),
+      giro3_ms: Number(g.planes?.[2]?.giro_ms || 30000),
+      motor_plan1_ms: Number(g.planes?.[0]?.giro_ms || 10000),
+      motor_plan2_ms: Number(g.planes?.[1]?.giro_ms || 20000),
+      motor_plan3_ms: Number(g.planes?.[2]?.giro_ms || 30000),
+      precio1: Number(g.planes?.[0]?.monto || 1000),
+      precio2: Number(g.planes?.[1]?.monto || 1800),
+      precio3: Number(g.planes?.[2]?.monto || 2500),
+      planes: (g.planes || []).slice(0, 3).map(p => ({
+        id: p.id,
+        creditos: Number(p.creditos || 1),
+        nombre: p.nombre,
+        etiqueta: p.etiqueta,
+        monto: Number(p.monto || 0),
+        precio: Number(p.monto || 0),
+        giro_ms: Number(p.giro_ms || 10000),
+        tiempo_giro_ms: Number(p.giro_ms || 10000),
+        motor_ms: Number(p.giro_ms || 10000),
+        descripcion: p.descripcion || ""
+      })),
+      ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      modoCobro: d.modoCobro,
+      comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
+      serverTime: new Date().toISOString()
+    });
+  }
 
   if (d.tipo === "basic") {
     return res.json({
@@ -503,6 +654,8 @@ app.post("/device/payment-log", (req, res) => {
     const device_id = String(req.body.device_id || req.body.deviceId || "ASPIRADORA_001").toUpperCase();
     const monto = Number(req.body.monto || 0);
     const segundos = Number(req.body.segundos || 0);
+    const creditos = Number(req.body.creditos || 0);
+    const motorMs = Number(req.body.motor_ms || req.body.motorMs || 0);
     const fecha = req.body.fecha || new Date().toISOString();
 
     const d = asegurarDevice(device_id);
@@ -511,10 +664,14 @@ app.post("/device/payment-log", (req, res) => {
     d.stats.pagosAprobados += 1;
     d.stats.segundosVendidos += segundos;
     d.stats.tiempoMotor += segundos;
+    d.stats.creditosVendidos = Number(d.stats.creditosVendidos || 0) + creditos;
+    d.stats.motorMsVendidos = Number(d.stats.motorMsVendidos || 0) + motorMs;
 
     d.stats.ultimosPagos.unshift({
       monto,
       segundos,
+      creditos,
+      motor_ms: motorMs,
       fecha,
       tipo: d.tipo
     });
@@ -560,7 +717,7 @@ async function crearPagoMercadoPago(pedido) {
     throw new Error("Monto inválido");
   }
 
-  if (!pedido.segundos || pedido.segundos <= 0) {
+  if (pedido.modoSistema !== "gachapon" && (!pedido.segundos || pedido.segundos <= 0)) {
     throw new Error("Tiempo inválido");
   }
 
@@ -585,6 +742,8 @@ async function crearPagoMercadoPago(pedido) {
       plan_nombre: pedido.plan_nombre,
       origen: pedido.origen,
       segundos: pedido.segundos,
+      motor_ms: pedido.motor_ms || 0,
+      creditos: pedido.creditos || 0,
       monto_total: pedido.monto,
       comision_evetec: comision,
       neto_duenio_estimado: netoDuenioEstimado,
@@ -629,6 +788,8 @@ async function crearPagoMercadoPago(pedido) {
     plan_nombre: pedido.plan_nombre,
     monto: pedido.monto,
     segundos: pedido.segundos,
+    motor_ms: pedido.motor_ms || 0,
+    creditos: pedido.creditos || 0,
     comisionEvetec: comision,
     netoDuenioEstimado,
     estado: "pending",
@@ -648,7 +809,9 @@ async function crearPagoMercadoPago(pedido) {
     external_reference,
     link,
     monto: pedido.monto,
-    segundos: pedido.segundos
+    segundos: pedido.segundos,
+    motor_ms: pedido.motor_ms || 0,
+    creditos: pedido.creditos || 0
   };
 }
 
@@ -667,6 +830,8 @@ app.post("/crear-pago", async (req, res) => {
       link: pago.link,
       monto: pago.monto,
       segundos: pago.segundos,
+      motor_ms: pago.motor_ms || 0,
+      creditos: pago.creditos || 0,
       tipo: pedido.modoSistema
     });
 
@@ -697,6 +862,8 @@ app.post("/basic/crear-pago", async (req, res) => {
       link: pago.link,
       monto: pago.monto,
       segundos: pago.segundos,
+      motor_ms: pago.motor_ms || 0,
+      creditos: pago.creditos || 0,
       tipo: pedido.modoSistema
     });
 
@@ -769,6 +936,8 @@ async function buscarEstadoMercadoPago(id) {
         detalle,
         payment_id: pago.id,
         segundos: pagoLocal?.segundos || pago.metadata?.segundos || 0,
+        motor_ms: pagoLocal?.motor_ms || pago.metadata?.motor_ms || 0,
+        creditos: pagoLocal?.creditos || pago.metadata?.creditos || 0,
         monto: pagoLocal?.monto || pago.metadata?.monto_total || 0,
         tipo: pagoLocal?.tipo || pago.metadata?.tipo || "unknown"
       };
@@ -782,6 +951,8 @@ async function buscarEstadoMercadoPago(id) {
     status: pagoLocal?.estado || "pending",
     detalle: pagoLocal ? "esperando_pago" : "no_encontrado",
     segundos: pagoLocal?.segundos || 0,
+    motor_ms: pagoLocal?.motor_ms || 0,
+    creditos: pagoLocal?.creditos || 0,
     monto: pagoLocal?.monto || 0,
     tipo: pagoLocal?.tipo || "unknown"
   };
@@ -1011,6 +1182,7 @@ app.get("/admin", (req, res) => {
       .tag{display:inline-block;background:#0f172a;color:#67e8f9;border:1px solid #155e75;border-radius:999px;padding:4px 10px;font-size:12px}
       .basic{color:#60a5fa;font-weight:bold}
       .premium{color:#c084fc;font-weight:bold}
+      .gachapon{color:#f97316;font-weight:bold}
       .ok{color:#22c55e;font-weight:bold}
       .bad{color:#ef4444;font-weight:bold}
       table{width:100%;border-collapse:collapse}
@@ -1051,7 +1223,7 @@ app.get("/admin", (req, res) => {
     html += `
       <tr>
         <td><b>${escaparHtml(id)}</b></td>
-        <td class="${d.tipo === "basic" ? "basic" : "premium"}">${d.tipo === "basic" ? "BÁSICO" : "PREMIUM"}</td>
+        <td class="${d.tipo === "basic" ? "basic" : (d.tipo === "gachapon" ? "gachapon" : "premium")}">${d.tipo === "basic" ? "BÁSICO" : (d.tipo === "gachapon" ? "GACHAPON" : "PREMIUM")}</td>
         <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
         <td class="money">$${formatoDinero(stats.totalRecaudado)}</td>
         <td>${stats.pagosAprobados || 0}</td>
@@ -1095,6 +1267,40 @@ app.get("/admin", (req, res) => {
           <button class="save" type="submit">Guardar básico</button>
         </form>
       </div>
+    </div>
+
+    <div class="box">
+      <h2>Gachapon: precios, créditos y tiempos de motor</h2>
+      <p class="small">Esto es lo que lee el INO desde /config/GACHAPON_001. El tiempo de giro se expresa en milisegundos: 10000 = 10 segundos.</p>
+      <form method="POST" action="/admin/gachapon/update">
+        Activo:
+        <input type="checkbox" name="activo" ${configGlobal.gachapon.activo ? "checked" : ""}><br>
+        Nombre:<input name="nombre" value="${escaparHtml(configGlobal.gachapon.nombre)}" size="16">
+        Título:<input name="titulo" value="${escaparHtml(configGlobal.gachapon.titulo)}" size="16"><br>
+        Mensaje:<input name="mensaje" value="${escaparHtml(configGlobal.gachapon.mensaje)}" size="32">
+        Instrucción:<input name="instruccion" value="${escaparHtml(configGlobal.gachapon.instruccion)}" size="24"><br>
+        Pulso motor ms:<input name="pulso_motor_ms" value="${configGlobal.gachapon.pulso_motor_ms}" size="8">
+        Pausa premios ms:<input name="pausa_premios_ms" value="${configGlobal.gachapon.pausa_premios_ms}" size="8"><br><br>
+  `;
+
+  configGlobal.gachapon.planes.slice(0, 3).forEach((p, i) => {
+    html += `
+      <div>
+        <b>Opción ${i + 1}</b>
+        ID:<input name="id${i}" value="${escaparHtml(p.id || "G" + (i + 1))}" size="5">
+        Créditos:<input name="creditos${i}" value="${p.creditos || i + 1}" size="4">
+        Nombre:<input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="12">
+        Etiqueta:<input name="etiqueta${i}" value="${escaparHtml(p.etiqueta || "")}" size="14">
+        Precio:<input name="monto${i}" value="${p.monto}" size="7">
+        Giro ms:<input name="giro_ms${i}" value="${p.giro_ms}" size="8">
+        Desc:<input name="descripcion${i}" value="${escaparHtml(p.descripcion || "")}" size="18">
+      </div>
+    `;
+  });
+
+  html += `
+        <button class="save" type="submit">Guardar Gachapon</button>
+      </form>
     </div>
 
     <div class="box">
@@ -1196,7 +1402,7 @@ app.get("/admin", (req, res) => {
     html += `
       <tr>
         <td><b>${escaparHtml(id)}</b></td>
-        <td class="${d.tipo === "basic" ? "basic" : "premium"}">${d.tipo === "basic" ? "BÁSICO" : "PREMIUM"}</td>
+        <td class="${d.tipo === "basic" ? "basic" : (d.tipo === "gachapon" ? "gachapon" : "premium")}">${d.tipo === "basic" ? "BÁSICO" : (d.tipo === "gachapon" ? "GACHAPON" : "PREMIUM")}</td>
         <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
         <td>${d.activo ? "SI" : "NO"}</td>
         <td>${d.modoMantenimiento ? "SI" : "NO"}</td>
@@ -1253,11 +1459,12 @@ app.get("/admin", (req, res) => {
       <h2>Agregar equipo</h2>
       <form method="POST" action="/admin/device/add">
         ID equipo:
-        <input name="deviceId" value="ASPIRADORA_BASIC_002" size="24">
+        <input name="deviceId" value="GACHAPON_001" size="24">
         Tipo:
         <select name="tipo">
           <option value="basic">Básico</option>
           <option value="premium">Premium</option>
+          <option value="gachapon">Gachapon</option>
         </select>
         <button class="save" type="submit">Agregar</button>
       </form>
@@ -1272,6 +1479,8 @@ app.get("/admin", (req, res) => {
           <th>Tipo</th>
           <th>Monto</th>
           <th>Segundos</th>
+          <th>Créditos</th>
+          <th>Motor</th>
           <th>Estado</th>
         </tr>
   `;
@@ -1289,6 +1498,8 @@ app.get("/admin", (req, res) => {
         <td>${escaparHtml(p.tipo || "")}</td>
         <td>$${formatoDinero(p.monto)}</td>
         <td>${formatoTiempo(p.segundos)}</td>
+        <td>${p.creditos || 0}</td>
+        <td>${p.motor_ms ? `${p.motor_ms} ms` : "-"}</td>
         <td>${escaparHtml(p.estado)}</td>
       </tr>
     `;
@@ -1349,6 +1560,32 @@ function actualizarArrayPlanes(arr, body, prefijo) {
     arr[i].descripcion = body[`descripcion${i}`] || arr[i].descripcion;
   }
 }
+
+app.post("/admin/gachapon/update", (req, res) => {
+  configGlobal.gachapon.activo = req.body.activo === "on";
+  configGlobal.gachapon.nombre = req.body.nombre || configGlobal.gachapon.nombre;
+  configGlobal.gachapon.titulo = req.body.titulo || configGlobal.gachapon.titulo;
+  configGlobal.gachapon.mensaje = req.body.mensaje || configGlobal.gachapon.mensaje;
+  configGlobal.gachapon.instruccion = req.body.instruccion || configGlobal.gachapon.instruccion;
+  configGlobal.gachapon.pulso_motor_ms = Math.max(100, Math.min(120000, Number(req.body.pulso_motor_ms) || configGlobal.gachapon.pulso_motor_ms));
+  configGlobal.gachapon.pausa_premios_ms = Math.max(0, Math.min(30000, Number(req.body.pausa_premios_ms) || configGlobal.gachapon.pausa_premios_ms));
+
+  for (let i = 0; i < 3; i++) {
+    if (!configGlobal.gachapon.planes[i]) configGlobal.gachapon.planes[i] = {};
+    const p = configGlobal.gachapon.planes[i];
+    p.id = String(req.body[`id${i}`] || p.id || `G${i + 1}`).toUpperCase();
+    p.creditos = Math.max(1, Math.min(99, Number(req.body[`creditos${i}`]) || p.creditos || i + 1));
+    p.nombre = req.body[`nombre${i}`] || p.nombre || `${p.creditos} CREDITO`;
+    p.etiqueta = req.body[`etiqueta${i}`] || p.etiqueta || "Elegir y pagar";
+    p.monto = Math.max(1, Number(req.body[`monto${i}`]) || p.monto || 1000);
+    p.montoBase = p.montoBase || p.monto;
+    p.giro_ms = Math.max(500, Math.min(120000, Number(req.body[`giro_ms${i}`]) || p.giro_ms || 10000));
+    p.descripcion = req.body[`descripcion${i}`] || p.descripcion || "";
+  }
+
+  guardarDatos();
+  res.redirect("/admin");
+});
 
 app.post("/admin/premium/prices/update", (req, res) => {
   actualizarArrayPlanes(configGlobal.premium.planes, req.body, "P");
@@ -1422,7 +1659,7 @@ app.post("/admin/device/add", (req, res) => {
   const tipo = String(req.body.tipo || detectarTipoDevice(id)).toLowerCase();
 
   if (id) {
-    devices[id] = nuevoDevice(tipo === "basic" ? "basic" : "premium");
+    devices[id] = nuevoDevice(["basic", "premium", "gachapon"].includes(tipo) ? tipo : detectarTipoDevice(id));
   }
 
   guardarDatos();
