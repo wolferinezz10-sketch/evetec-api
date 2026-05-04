@@ -213,6 +213,18 @@ function asegurarEstructuraConfig() {
       instruccion: "Toca una opcion",
       pulso_motor_ms: 10000,
       pausa_premios_ms: 650,
+      precio1_x: 140,
+      precio1_y: 381,
+      precio2_x: 255,
+      precio2_y: 381,
+      precio3_x: 368,
+      precio3_y: 381,
+      qr_pago_cx: 240,
+      qr_pago_cy: 242,
+      qr_pago_scale: 4,
+      qr_owner_cx: 240,
+      qr_owner_cy: 270,
+      qr_owner_scale: 5,
       planes: [
         { id: "G1", creditos: 1, nombre: "1 CREDITO", etiqueta: "Elegir y pagar", monto: 1000, montoBase: 1000, giro_ms: 10000, descripcion: "Un premio" },
         { id: "G2", creditos: 2, nombre: "2 CREDITOS", etiqueta: "Promo 5% OFF", monto: 1800, montoBase: 1800, giro_ms: 20000, descripcion: "Dos premios" },
@@ -236,6 +248,20 @@ function asegurarEstructuraConfig() {
     if (!gp.giro_ms) gp.giro_ms = 10000 * (i + 1);
     if (typeof gp.descripcion === "undefined") gp.descripcion = "";
   }
+
+  const g = configGlobal.gachapon;
+  if (typeof g.precio1_x === "undefined") g.precio1_x = 140;
+  if (typeof g.precio1_y === "undefined") g.precio1_y = 381;
+  if (typeof g.precio2_x === "undefined") g.precio2_x = 255;
+  if (typeof g.precio2_y === "undefined") g.precio2_y = 381;
+  if (typeof g.precio3_x === "undefined") g.precio3_x = 368;
+  if (typeof g.precio3_y === "undefined") g.precio3_y = 381;
+  if (typeof g.qr_pago_cx === "undefined") g.qr_pago_cx = 240;
+  if (typeof g.qr_pago_cy === "undefined") g.qr_pago_cy = 242;
+  if (typeof g.qr_pago_scale === "undefined") g.qr_pago_scale = 4;
+  if (typeof g.qr_owner_cx === "undefined") g.qr_owner_cx = 240;
+  if (typeof g.qr_owner_cy === "undefined") g.qr_owner_cy = 270;
+  if (typeof g.qr_owner_scale === "undefined") g.qr_owner_scale = 5;
 
   delete configGlobal.planes;
   delete configGlobal.preciosExtra;
@@ -556,6 +582,18 @@ app.get("/config/:deviceId", (req, res) => {
       instruccion: g.instruccion || "Toca una opcion",
       pulso_motor_ms: Number(g.pulso_motor_ms || 10000),
       pausa_premios_ms: Number(g.pausa_premios_ms || 650),
+      precio1_x: Number(g.precio1_x ?? 140),
+      precio1_y: Number(g.precio1_y ?? 381),
+      precio2_x: Number(g.precio2_x ?? 255),
+      precio2_y: Number(g.precio2_y ?? 381),
+      precio3_x: Number(g.precio3_x ?? 368),
+      precio3_y: Number(g.precio3_y ?? 381),
+      qr_pago_cx: Number(g.qr_pago_cx ?? 240),
+      qr_pago_cy: Number(g.qr_pago_cy ?? 242),
+      qr_pago_scale: Number(g.qr_pago_scale ?? 4),
+      qr_owner_cx: Number(g.qr_owner_cx ?? 240),
+      qr_owner_cy: Number(g.qr_owner_cy ?? 270),
+      qr_owner_scale: Number(g.qr_owner_scale ?? 5),
       giro1_ms: Number(g.planes?.[0]?.giro_ms || 10000),
       giro2_ms: Number(g.planes?.[1]?.giro_ms || 20000),
       giro3_ms: Number(g.planes?.[2]?.giro_ms || 30000),
@@ -565,7 +603,7 @@ app.get("/config/:deviceId", (req, res) => {
       precio1: Number(g.planes?.[0]?.monto || 1000),
       precio2: Number(g.planes?.[1]?.monto || 1800),
       precio3: Number(g.planes?.[2]?.monto || 2500),
-      planes: (g.planes || []).slice(0, 3).map(p => ({
+      planes: (g.planes || []).slice(0, 3).map((p, idx) => ({
         id: p.id,
         creditos: Number(p.creditos || 1),
         nombre: p.nombre,
@@ -575,6 +613,8 @@ app.get("/config/:deviceId", (req, res) => {
         giro_ms: Number(p.giro_ms || 10000),
         tiempo_giro_ms: Number(p.giro_ms || 10000),
         motor_ms: Number(p.giro_ms || 10000),
+        precio_x: Number(p.precio_x ?? g[`precio${idx + 1}_x`] ?? 0),
+        precio_y: Number(p.precio_y ?? g[`precio${idx + 1}_y`] ?? 0),
         descripcion: p.descripcion || ""
       })),
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
@@ -1281,6 +1321,20 @@ app.get("/admin", (req, res) => {
         Instrucción:<input name="instruccion" value="${escaparHtml(configGlobal.gachapon.instruccion)}" size="24"><br>
         Pulso motor ms:<input name="pulso_motor_ms" value="${configGlobal.gachapon.pulso_motor_ms}" size="8">
         Pausa premios ms:<input name="pausa_premios_ms" value="${configGlobal.gachapon.pausa_premios_ms}" size="8"><br><br>
+        <b>Ajuste visual pantalla 480x480</b><br>
+        Precio 1 X:<input name="precio1_x" value="${configGlobal.gachapon.precio1_x}" size="5">
+        Y:<input name="precio1_y" value="${configGlobal.gachapon.precio1_y}" size="5">
+        Precio 2 X:<input name="precio2_x" value="${configGlobal.gachapon.precio2_x}" size="5">
+        Y:<input name="precio2_y" value="${configGlobal.gachapon.precio2_y}" size="5">
+        Precio 3 X:<input name="precio3_x" value="${configGlobal.gachapon.precio3_x}" size="5">
+        Y:<input name="precio3_y" value="${configGlobal.gachapon.precio3_y}" size="5"><br>
+        QR Pago CX:<input name="qr_pago_cx" value="${configGlobal.gachapon.qr_pago_cx}" size="5">
+        CY:<input name="qr_pago_cy" value="${configGlobal.gachapon.qr_pago_cy}" size="5">
+        Escala:<input name="qr_pago_scale" value="${configGlobal.gachapon.qr_pago_scale}" size="4">
+        QR Vinculación CX:<input name="qr_owner_cx" value="${configGlobal.gachapon.qr_owner_cx}" size="5">
+        CY:<input name="qr_owner_cy" value="${configGlobal.gachapon.qr_owner_cy}" size="5">
+        Escala:<input name="qr_owner_scale" value="${configGlobal.gachapon.qr_owner_scale}" size="4"><br>
+        <span class="small">CX/CY son el centro del QR. Para precios, subí/bajá Y y mové X hasta calzar con el fondo.</span><br><br>
   `;
 
   configGlobal.gachapon.planes.slice(0, 3).forEach((p, i) => {
@@ -1569,6 +1623,19 @@ app.post("/admin/gachapon/update", (req, res) => {
   configGlobal.gachapon.instruccion = req.body.instruccion || configGlobal.gachapon.instruccion;
   configGlobal.gachapon.pulso_motor_ms = Math.max(100, Math.min(120000, Number(req.body.pulso_motor_ms) || configGlobal.gachapon.pulso_motor_ms));
   configGlobal.gachapon.pausa_premios_ms = Math.max(0, Math.min(30000, Number(req.body.pausa_premios_ms) || configGlobal.gachapon.pausa_premios_ms));
+
+  configGlobal.gachapon.precio1_x = Math.max(0, Math.min(480, Number(req.body.precio1_x) || configGlobal.gachapon.precio1_x));
+  configGlobal.gachapon.precio1_y = Math.max(0, Math.min(480, Number(req.body.precio1_y) || configGlobal.gachapon.precio1_y));
+  configGlobal.gachapon.precio2_x = Math.max(0, Math.min(480, Number(req.body.precio2_x) || configGlobal.gachapon.precio2_x));
+  configGlobal.gachapon.precio2_y = Math.max(0, Math.min(480, Number(req.body.precio2_y) || configGlobal.gachapon.precio2_y));
+  configGlobal.gachapon.precio3_x = Math.max(0, Math.min(480, Number(req.body.precio3_x) || configGlobal.gachapon.precio3_x));
+  configGlobal.gachapon.precio3_y = Math.max(0, Math.min(480, Number(req.body.precio3_y) || configGlobal.gachapon.precio3_y));
+  configGlobal.gachapon.qr_pago_cx = Math.max(0, Math.min(480, Number(req.body.qr_pago_cx) || configGlobal.gachapon.qr_pago_cx));
+  configGlobal.gachapon.qr_pago_cy = Math.max(0, Math.min(480, Number(req.body.qr_pago_cy) || configGlobal.gachapon.qr_pago_cy));
+  configGlobal.gachapon.qr_pago_scale = Math.max(2, Math.min(7, Number(req.body.qr_pago_scale) || configGlobal.gachapon.qr_pago_scale));
+  configGlobal.gachapon.qr_owner_cx = Math.max(0, Math.min(480, Number(req.body.qr_owner_cx) || configGlobal.gachapon.qr_owner_cx));
+  configGlobal.gachapon.qr_owner_cy = Math.max(0, Math.min(480, Number(req.body.qr_owner_cy) || configGlobal.gachapon.qr_owner_cy));
+  configGlobal.gachapon.qr_owner_scale = Math.max(2, Math.min(7, Number(req.body.qr_owner_scale) || configGlobal.gachapon.qr_owner_scale));
 
   for (let i = 0; i < 3; i++) {
     if (!configGlobal.gachapon.planes[i]) configGlobal.gachapon.planes[i] = {};
