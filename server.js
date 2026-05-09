@@ -143,6 +143,21 @@ function formatoTiempo(segundos) {
   return `${s}s`;
 }
 
+
+
+function boolFlexible(valor, defecto = true) {
+  if (typeof valor === "boolean") return valor;
+  if (typeof valor === "number") return valor !== 0;
+  if (valor === undefined || valor === null) return defecto;
+
+  const s = String(valor).trim().toLowerCase();
+
+  if (["true", "1", "on", "yes", "si", "sí", "normal", "high", "alto"].includes(s)) return true;
+  if (["false", "0", "off", "no", "inversa", "invertida", "low", "bajo"].includes(s)) return false;
+
+  return defecto;
+}
+
 function detectarTipoDevice(deviceId) {
   const id = String(deviceId || "").toUpperCase();
 
@@ -593,9 +608,11 @@ app.get("/config/:deviceId", (req, res) => {
       instruccion: g.instruccion || "Toca una opcion",
       pulso_motor_ms: Number(g.pulso_motor_ms || 10000),
       pausa_premios_ms: Number(g.pausa_premios_ms || 650),
-      direccion_motor: Boolean(g.direccion_motor),
-      motor_direccion: Boolean(g.direccion_motor),
-      direccion: Boolean(g.direccion_motor),
+      direccion_motor: boolFlexible(g.direccion_motor, true),
+      motor_direccion: boolFlexible(g.direccion_motor, true),
+      direccion: boolFlexible(g.direccion_motor, true),
+      invertir_giro: !boolFlexible(g.direccion_motor, true),
+      dir_pin_level: boolFlexible(g.direccion_motor, true) ? "HIGH" : "LOW",
       velocidad_motor_us: Number(g.velocidad_motor_us || 1000),
       motor_velocidad_us: Number(g.velocidad_motor_us || 1000),
       velocidad_us: Number(g.velocidad_motor_us || 1000),
@@ -1353,14 +1370,14 @@ app.get("/admin", (req, res) => {
         <b>Calibración NEMA17 + Pololu</b><br>
         Dirección:
         <select name="direccion_motor">
-          <option value="true" ${configGlobal.gachapon.direccion_motor ? "selected" : ""}>NORMAL</option>
-          <option value="false" ${!configGlobal.gachapon.direccion_motor ? "selected" : ""}>INVERSA</option>
+          <option value="true" ${boolFlexible(configGlobal.gachapon.direccion_motor, true) ? "selected" : ""}>NORMAL / DIR HIGH</option>
+          <option value="false" ${!boolFlexible(configGlobal.gachapon.direccion_motor, true) ? "selected" : ""}>INVERSA / DIR LOW</option>
         </select>
         Velocidad us:<input name="velocidad_motor_us" value="${configGlobal.gachapon.velocidad_motor_us || 1000}" size="7"><br>
         Pasos plan 1:<input name="pasos1" value="${configGlobal.gachapon.pasos1 || configGlobal.gachapon.planes?.[0]?.pasos_motor || 200}" size="7">
         Pasos plan 2:<input name="pasos2" value="${configGlobal.gachapon.pasos2 || configGlobal.gachapon.planes?.[1]?.pasos_motor || 400}" size="7">
         Pasos plan 3:<input name="pasos3" value="${configGlobal.gachapon.pasos3 || configGlobal.gachapon.planes?.[2]?.pasos_motor || 600}" size="7"><br>
-        <span class="small">Estos pasos son los que usa el ESP32 en STEP GPIO40 y DIR GPIO2. Los botones TEST prueban estos valores.</span><br><br>
+        <span class="small">Estos pasos son los que usa el ESP32 en STEP GPIO40 y DIR GPIO2. Si invertís dirección, el ESP32 cambia GPIO2 de HIGH a LOW en el próximo refresco de configuración.</span><br><br>
         <b>Ajuste visual pantalla 480x480</b><br>
         Precio 1 X:<input name="precio1_x" value="${configGlobal.gachapon.precio1_x}" size="5">
         Y:<input name="precio1_y" value="${configGlobal.gachapon.precio1_y}" size="5">
@@ -1665,7 +1682,7 @@ app.post("/admin/gachapon/update", (req, res) => {
   configGlobal.gachapon.pulso_motor_ms = Math.max(100, Math.min(120000, Number(req.body.pulso_motor_ms) || configGlobal.gachapon.pulso_motor_ms));
   configGlobal.gachapon.pausa_premios_ms = Math.max(0, Math.min(30000, Number(req.body.pausa_premios_ms) || configGlobal.gachapon.pausa_premios_ms));
 
-  configGlobal.gachapon.direccion_motor = req.body.direccion_motor === "true" || req.body.direccion_motor === "on" || req.body.direccion_motor === true;
+  configGlobal.gachapon.direccion_motor = boolFlexible(req.body.direccion_motor, boolFlexible(configGlobal.gachapon.direccion_motor, true));
   configGlobal.gachapon.velocidad_motor_us = Math.max(150, Math.min(10000, Number(req.body.velocidad_motor_us) || configGlobal.gachapon.velocidad_motor_us || 1000));
   configGlobal.gachapon.pasos1 = Math.max(1, Math.min(20000, Number(req.body.pasos1) || configGlobal.gachapon.pasos1 || 200));
   configGlobal.gachapon.pasos2 = Math.max(1, Math.min(20000, Number(req.body.pasos2) || configGlobal.gachapon.pasos2 || 400));
