@@ -1207,13 +1207,16 @@ app.post("/unlink-owner/:deviceId", (req, res) => {
 app.get("/owner-status/:deviceId", (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
 
+  // La vinculacion solo se pierde si se toca "Desvincular MP" desde el panel.
+  // El ESP32 tambien guarda cache local para no pedir vinculacion en cada encendido.
   res.json({
     ok: true,
     linked: Boolean(d.ownerLinked && d.ownerAccessToken),
     ownerUserId: d.ownerUserId || null,
     tipo: d.tipo,
     modoCobro: d.modoCobro,
-    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
+    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
+    seDesvinculaSoloDesdePanel: true
   });
 });
 // =====================================================
