@@ -77,6 +77,11 @@ let configGlobal = {
     instruccion: "Toca una opcion",
     pulso_motor_ms: 10000,
     pausa_premios_ms: 650,
+    direccion_motor: true,
+    velocidad_motor_us: 1000,
+    pasos1: 200,
+    pasos2: 400,
+    pasos3: 600,
     planes: [
       { id: "G1", creditos: 1, nombre: "1 CREDITO", etiqueta: "Elegir y pagar", monto: 1000, montoBase: 1000, giro_ms: 10000, descripcion: "Un premio" },
       { id: "G2", creditos: 2, nombre: "2 CREDITOS", etiqueta: "Promo 5% OFF", monto: 1800, montoBase: 1800, giro_ms: 20000, descripcion: "Dos premios" },
@@ -246,6 +251,7 @@ function asegurarEstructuraConfig() {
     if (!gp.monto) gp.monto = 1000 * (i + 1);
     if (!gp.montoBase) gp.montoBase = gp.monto;
     if (!gp.giro_ms) gp.giro_ms = 10000 * (i + 1);
+    if (!gp.pasos_motor) gp.pasos_motor = 200 * (i + 1);
     if (typeof gp.descripcion === "undefined") gp.descripcion = "";
   }
 
@@ -262,6 +268,11 @@ function asegurarEstructuraConfig() {
   if (typeof g.qr_owner_cx === "undefined") g.qr_owner_cx = 240;
   if (typeof g.qr_owner_cy === "undefined") g.qr_owner_cy = 270;
   if (typeof g.qr_owner_scale === "undefined") g.qr_owner_scale = 5;
+  if (typeof g.direccion_motor === "undefined") g.direccion_motor = true;
+  if (typeof g.velocidad_motor_us === "undefined") g.velocidad_motor_us = 1000;
+  if (typeof g.pasos1 === "undefined") g.pasos1 = 200;
+  if (typeof g.pasos2 === "undefined") g.pasos2 = 400;
+  if (typeof g.pasos3 === "undefined") g.pasos3 = 600;
 
   delete configGlobal.planes;
   delete configGlobal.preciosExtra;
@@ -582,6 +593,18 @@ app.get("/config/:deviceId", (req, res) => {
       instruccion: g.instruccion || "Toca una opcion",
       pulso_motor_ms: Number(g.pulso_motor_ms || 10000),
       pausa_premios_ms: Number(g.pausa_premios_ms || 650),
+      direccion_motor: Boolean(g.direccion_motor),
+      motor_direccion: Boolean(g.direccion_motor),
+      direccion: Boolean(g.direccion_motor),
+      velocidad_motor_us: Number(g.velocidad_motor_us || 1000),
+      motor_velocidad_us: Number(g.velocidad_motor_us || 1000),
+      velocidad_us: Number(g.velocidad_motor_us || 1000),
+      pasos1: Number(g.pasos1 || g.planes?.[0]?.pasos_motor || 200),
+      pasos2: Number(g.pasos2 || g.planes?.[1]?.pasos_motor || 400),
+      pasos3: Number(g.pasos3 || g.planes?.[2]?.pasos_motor || 600),
+      motor_pasos1: Number(g.pasos1 || g.planes?.[0]?.pasos_motor || 200),
+      motor_pasos2: Number(g.pasos2 || g.planes?.[1]?.pasos_motor || 400),
+      motor_pasos3: Number(g.pasos3 || g.planes?.[2]?.pasos_motor || 600),
       precio1_x: Number(g.precio1_x ?? 140),
       precio1_y: Number(g.precio1_y ?? 381),
       precio2_x: Number(g.precio2_x ?? 255),
@@ -613,6 +636,9 @@ app.get("/config/:deviceId", (req, res) => {
         giro_ms: Number(p.giro_ms || 10000),
         tiempo_giro_ms: Number(p.giro_ms || 10000),
         motor_ms: Number(p.giro_ms || 10000),
+        pasos: Number(p.pasos_motor || g[`pasos${idx + 1}`] || 200 * (idx + 1)),
+        pasos_motor: Number(p.pasos_motor || g[`pasos${idx + 1}`] || 200 * (idx + 1)),
+        motor_pasos: Number(p.pasos_motor || g[`pasos${idx + 1}`] || 200 * (idx + 1)),
         precio_x: Number(p.precio_x ?? g[`precio${idx + 1}_x`] ?? 0),
         precio_y: Number(p.precio_y ?? g[`precio${idx + 1}_y`] ?? 0),
         descripcion: p.descripcion || ""
@@ -1321,6 +1347,17 @@ app.get("/admin", (req, res) => {
         Instrucción:<input name="instruccion" value="${escaparHtml(configGlobal.gachapon.instruccion)}" size="24"><br>
         Pulso motor ms:<input name="pulso_motor_ms" value="${configGlobal.gachapon.pulso_motor_ms}" size="8">
         Pausa premios ms:<input name="pausa_premios_ms" value="${configGlobal.gachapon.pausa_premios_ms}" size="8"><br><br>
+        <b>Calibración NEMA17 + Pololu</b><br>
+        Dirección:
+        <select name="direccion_motor">
+          <option value="true" ${configGlobal.gachapon.direccion_motor ? "selected" : ""}>NORMAL</option>
+          <option value="false" ${!configGlobal.gachapon.direccion_motor ? "selected" : ""}>INVERSA</option>
+        </select>
+        Velocidad us:<input name="velocidad_motor_us" value="${configGlobal.gachapon.velocidad_motor_us || 1000}" size="7"><br>
+        Pasos plan 1:<input name="pasos1" value="${configGlobal.gachapon.pasos1 || configGlobal.gachapon.planes?.[0]?.pasos_motor || 200}" size="7">
+        Pasos plan 2:<input name="pasos2" value="${configGlobal.gachapon.pasos2 || configGlobal.gachapon.planes?.[1]?.pasos_motor || 400}" size="7">
+        Pasos plan 3:<input name="pasos3" value="${configGlobal.gachapon.pasos3 || configGlobal.gachapon.planes?.[2]?.pasos_motor || 600}" size="7"><br>
+        <span class="small">Estos pasos son los que usa el ESP32 en STEP GPIO40 y DIR GPIO2. Los botones TEST prueban estos valores.</span><br><br>
         <b>Ajuste visual pantalla 480x480</b><br>
         Precio 1 X:<input name="precio1_x" value="${configGlobal.gachapon.precio1_x}" size="5">
         Y:<input name="precio1_y" value="${configGlobal.gachapon.precio1_y}" size="5">
@@ -1347,6 +1384,7 @@ app.get("/admin", (req, res) => {
         Etiqueta:<input name="etiqueta${i}" value="${escaparHtml(p.etiqueta || "")}" size="14">
         Precio:<input name="monto${i}" value="${p.monto}" size="7">
         Giro ms:<input name="giro_ms${i}" value="${p.giro_ms}" size="8">
+        Pasos:<input name="pasos_motor${i}" value="${p.pasos_motor || configGlobal.gachapon[`pasos${i + 1}`] || 200 * (i + 1)}" size="7">
         Desc:<input name="descripcion${i}" value="${escaparHtml(p.descripcion || "")}" size="18">
       </div>
     `;
@@ -1624,6 +1662,12 @@ app.post("/admin/gachapon/update", (req, res) => {
   configGlobal.gachapon.pulso_motor_ms = Math.max(100, Math.min(120000, Number(req.body.pulso_motor_ms) || configGlobal.gachapon.pulso_motor_ms));
   configGlobal.gachapon.pausa_premios_ms = Math.max(0, Math.min(30000, Number(req.body.pausa_premios_ms) || configGlobal.gachapon.pausa_premios_ms));
 
+  configGlobal.gachapon.direccion_motor = req.body.direccion_motor === "true" || req.body.direccion_motor === "on" || req.body.direccion_motor === true;
+  configGlobal.gachapon.velocidad_motor_us = Math.max(150, Math.min(10000, Number(req.body.velocidad_motor_us) || configGlobal.gachapon.velocidad_motor_us || 1000));
+  configGlobal.gachapon.pasos1 = Math.max(1, Math.min(20000, Number(req.body.pasos1) || configGlobal.gachapon.pasos1 || 200));
+  configGlobal.gachapon.pasos2 = Math.max(1, Math.min(20000, Number(req.body.pasos2) || configGlobal.gachapon.pasos2 || 400));
+  configGlobal.gachapon.pasos3 = Math.max(1, Math.min(20000, Number(req.body.pasos3) || configGlobal.gachapon.pasos3 || 600));
+
   configGlobal.gachapon.precio1_x = Math.max(0, Math.min(480, Number(req.body.precio1_x) || configGlobal.gachapon.precio1_x));
   configGlobal.gachapon.precio1_y = Math.max(0, Math.min(480, Number(req.body.precio1_y) || configGlobal.gachapon.precio1_y));
   configGlobal.gachapon.precio2_x = Math.max(0, Math.min(480, Number(req.body.precio2_x) || configGlobal.gachapon.precio2_x));
@@ -1647,6 +1691,8 @@ app.post("/admin/gachapon/update", (req, res) => {
     p.monto = Math.max(1, Number(req.body[`monto${i}`]) || p.monto || 1000);
     p.montoBase = p.montoBase || p.monto;
     p.giro_ms = Math.max(500, Math.min(120000, Number(req.body[`giro_ms${i}`]) || p.giro_ms || 10000));
+    p.pasos_motor = Math.max(1, Math.min(20000, Number(req.body[`pasos_motor${i}`]) || configGlobal.gachapon[`pasos${i + 1}`] || p.pasos_motor || 200 * (i + 1)));
+    configGlobal.gachapon[`pasos${i + 1}`] = p.pasos_motor;
     p.descripcion = req.body[`descripcion${i}`] || p.descripcion || "";
   }
 
