@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const QRCode = require("qrcode");
 const fs = require("fs");
+const crypto = require("crypto");
 
 const app = express();
 
@@ -14,11 +15,47 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://evetec-api.onren
 
 const MP_CLIENT_ID = process.env.MP_CLIENT_ID || "";
 const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || "";
-const EVETEC_MP_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || "";
+const EVETEC_MP_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN || "";
 const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const DEVICE_API_KEY = process.env.DEVICE_API_KEY || "";
 
 const DATA_FILE = process.env.DATA_FILE || "evetec-timers-data.json";
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
+const oauthStates = new Map();
+
+function comparacionSegura(a, b) {
+  const aa = Buffer.from(String(a || ""));
+  const bb = Buffer.from(String(b || ""));
+  return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
+}
+
+function requireAdmin(req, res, next) {
+  if (!ADMIN_PASSWORD) {
+    return res.status(503).send("Panel administrativo deshabilitado: falta ADMIN_PASSWORD.");
+  }
+
+  const auth = String(req.headers.authorization || "");
+  if (auth.startsWith("Basic ")) {
+    try {
+      const decoded = Buffer.from(auth.slice(6), "base64").toString("utf8");
+      const split = decoded.indexOf(":");
+      const password = split >= 0 ? decoded.slice(split + 1) : "";
+      if (comparacionSegura(password, ADMIN_PASSWORD)) return next();
+    } catch (_) {}
+  }
+
+  res.set("WWW-Authenticate", 'Basic realm="EVETEC Admin", charset="UTF-8"');
+  return res.status(401).send("Autenticacion requerida.");
+}
+
+function requireDevice(req, res, next) {
+  if (!DEVICE_API_KEY) return next(); // Compatibilidad del prototipo; configurar en produccion.
+  if (comparacionSegura(req.get("x-device-key"), DEVICE_API_KEY)) return next();
+  return res.status(401).json({ ok: false, error: "device_unauthorized" });
+}
+
+app.use("/admin", requireAdmin);
 
 function statsIniciales() {
   return {
@@ -62,11 +99,11 @@ let configGlobal = {
 
   basic: {
     activo: true,
-    nombre: "Uso básico",
-    segundos: 30,
-    monto: 100,
-    montoBase: 100,
-    descripcion: "Sistema básico QR fijo"
+    nombre: "Aspirado 4 minutos",
+    segundos: 240,
+    monto: 10,
+    montoBase: 10,
+    descripcion: "Prueba inicial QR"
   },
 
   gachapon: {
@@ -77,15 +114,23 @@ let configGlobal = {
     instruccion: "Toca una opcion",
     pulso_motor_ms: 10000,
     pausa_premios_ms: 650,
-    direccion_motor: true,
-    velocidad_motor_us: 1000,
-    pasos1: 200,
-    pasos2: 400,
-    pasos3: 600,
     planes: [
       { id: "G1", creditos: 1, nombre: "1 CREDITO", etiqueta: "Elegir y pagar", monto: 1000, montoBase: 1000, giro_ms: 10000, descripcion: "Un premio" },
       { id: "G2", creditos: 2, nombre: "2 CREDITOS", etiqueta: "Promo 5% OFF", monto: 1800, montoBase: 1800, giro_ms: 20000, descripcion: "Dos premios" },
       { id: "G3", creditos: 3, nombre: "3 CREDITOS", etiqueta: "Mejor valor", monto: 2500, montoBase: 2500, giro_ms: 30000, descripcion: "Tres premios" }
+    ]
+  },
+
+  arcade: {
+    activo: true,
+    nombre: "Galaga QR",
+    titulo: "GALAGA QR",
+    mensaje: "Inserta creditos con Mercado Pago",
+    creditosPorPartida: 1,
+    planes: [
+      { id: "A1", creditos: 1, nombre: "1 CREDITO", etiqueta: "1 partida", monto: 500, montoBase: 500, descripcion: "Una partida" },
+      { id: "A3", creditos: 3, nombre: "3 CREDITOS", etiqueta: "Pack arcade", monto: 1200, montoBase: 1200, descripcion: "Tres partidas" },
+      { id: "A5", creditos: 5, nombre: "5 CREDITOS", etiqueta: "Mejor valor", monto: 1800, montoBase: 1800, descripcion: "Cinco partidas" }
     ]
   }
 };
@@ -143,23 +188,26 @@ function formatoTiempo(segundos) {
   return `${s}s`;
 }
 
+function claseTipoDevice(tipo) {
+  if (tipo === "basic") return "basic";
+  if (tipo === "gachapon") return "gachapon";
+  if (tipo === "arcade") return "arcade";
+  return "premium";
+}
 
-
-function boolFlexible(valor, defecto = true) {
-  if (typeof valor === "boolean") return valor;
-  if (typeof valor === "number") return valor !== 0;
-  if (valor === undefined || valor === null) return defecto;
-
-  const s = String(valor).trim().toLowerCase();
-
-  if (["true", "1", "on", "yes", "si", "sí", "normal", "high", "alto"].includes(s)) return true;
-  if (["false", "0", "off", "no", "inversa", "invertida", "low", "bajo"].includes(s)) return false;
-
-  return defecto;
+function etiquetaTipoDevice(tipo) {
+  if (tipo === "basic") return "BASICO";
+  if (tipo === "gachapon") return "GACHAPON";
+  if (tipo === "arcade") return "ARCADE";
+  return "PREMIUM";
 }
 
 function detectarTipoDevice(deviceId) {
   const id = String(deviceId || "").toUpperCase();
+
+  if (id.includes("GALAGA") || id.includes("GAME") || id.includes("ARCADE")) {
+    return "arcade";
+  }
 
   if (id.includes("GACHAPON") || id.includes("GACHA")) {
     return "gachapon";
@@ -176,12 +224,6 @@ function limpiarDevicesMigrados(obj) {
   const limpio = {};
 
   for (const id of Object.keys(obj || {})) {
-    const upper = String(id).toUpperCase();
-
-    if (upper.includes("GALAGA")) continue;
-    if (upper.includes("GAME")) continue;
-    if (upper.includes("ARCADE")) continue;
-
     limpio[id] = obj[id];
   }
 
@@ -233,22 +275,25 @@ function asegurarEstructuraConfig() {
       instruccion: "Toca una opcion",
       pulso_motor_ms: 10000,
       pausa_premios_ms: 650,
-      precio1_x: 140,
-      precio1_y: 381,
-      precio2_x: 255,
-      precio2_y: 381,
-      precio3_x: 368,
-      precio3_y: 381,
-      qr_pago_cx: 240,
-      qr_pago_cy: 242,
-      qr_pago_scale: 4,
-      qr_owner_cx: 240,
-      qr_owner_cy: 270,
-      qr_owner_scale: 5,
       planes: [
         { id: "G1", creditos: 1, nombre: "1 CREDITO", etiqueta: "Elegir y pagar", monto: 1000, montoBase: 1000, giro_ms: 10000, descripcion: "Un premio" },
         { id: "G2", creditos: 2, nombre: "2 CREDITOS", etiqueta: "Promo 5% OFF", monto: 1800, montoBase: 1800, giro_ms: 20000, descripcion: "Dos premios" },
         { id: "G3", creditos: 3, nombre: "3 CREDITOS", etiqueta: "Mejor valor", monto: 2500, montoBase: 2500, giro_ms: 30000, descripcion: "Tres premios" }
+      ]
+    };
+  }
+
+  if (!configGlobal.arcade) {
+    configGlobal.arcade = {
+      activo: true,
+      nombre: "Galaga QR",
+      titulo: "GALAGA QR",
+      mensaje: "Inserta creditos con Mercado Pago",
+      creditosPorPartida: 1,
+      planes: [
+        { id: "A1", creditos: 1, nombre: "1 CREDITO", etiqueta: "1 partida", monto: 500, montoBase: 500, descripcion: "Una partida" },
+        { id: "A3", creditos: 3, nombre: "3 CREDITOS", etiqueta: "Pack arcade", monto: 1200, montoBase: 1200, descripcion: "Tres partidas" },
+        { id: "A5", creditos: 5, nombre: "5 CREDITOS", etiqueta: "Mejor valor", monto: 1800, montoBase: 1800, descripcion: "Cinco partidas" }
       ]
     };
   }
@@ -266,28 +311,28 @@ function asegurarEstructuraConfig() {
     if (!gp.monto) gp.monto = 1000 * (i + 1);
     if (!gp.montoBase) gp.montoBase = gp.monto;
     if (!gp.giro_ms) gp.giro_ms = 10000 * (i + 1);
-    if (!gp.pasos_motor) gp.pasos_motor = 200 * (i + 1);
     if (typeof gp.descripcion === "undefined") gp.descripcion = "";
   }
 
-  const g = configGlobal.gachapon;
-  if (typeof g.precio1_x === "undefined") g.precio1_x = 140;
-  if (typeof g.precio1_y === "undefined") g.precio1_y = 381;
-  if (typeof g.precio2_x === "undefined") g.precio2_x = 255;
-  if (typeof g.precio2_y === "undefined") g.precio2_y = 381;
-  if (typeof g.precio3_x === "undefined") g.precio3_x = 368;
-  if (typeof g.precio3_y === "undefined") g.precio3_y = 381;
-  if (typeof g.qr_pago_cx === "undefined") g.qr_pago_cx = 240;
-  if (typeof g.qr_pago_cy === "undefined") g.qr_pago_cy = 242;
-  if (typeof g.qr_pago_scale === "undefined") g.qr_pago_scale = 4;
-  if (typeof g.qr_owner_cx === "undefined") g.qr_owner_cx = 240;
-  if (typeof g.qr_owner_cy === "undefined") g.qr_owner_cy = 270;
-  if (typeof g.qr_owner_scale === "undefined") g.qr_owner_scale = 5;
-  if (typeof g.direccion_motor === "undefined") g.direccion_motor = true;
-  if (typeof g.velocidad_motor_us === "undefined") g.velocidad_motor_us = 1000;
-  if (typeof g.pasos1 === "undefined") g.pasos1 = 200;
-  if (typeof g.pasos2 === "undefined") g.pasos2 = 400;
-  if (typeof g.pasos3 === "undefined") g.pasos3 = 600;
+  if (!Array.isArray(configGlobal.arcade.planes)) configGlobal.arcade.planes = [];
+  for (let i = 0; i < 3; i++) {
+    if (!configGlobal.arcade.planes[i]) {
+      const creditos = i === 0 ? 1 : (i === 1 ? 3 : 5);
+      configGlobal.arcade.planes[i] = { id: `A${creditos}`, creditos, nombre: `${creditos} CREDITO${creditos > 1 ? "S" : ""}`, etiqueta: "Jugar", monto: 500 * creditos, montoBase: 500 * creditos, descripcion: "" };
+    }
+    const ap = configGlobal.arcade.planes[i];
+    if (!ap.id) ap.id = `A${i + 1}`;
+    if (!ap.creditos) ap.creditos = i + 1;
+    if (!ap.nombre) ap.nombre = `${ap.creditos} CREDITO${ap.creditos > 1 ? "S" : ""}`;
+    if (!ap.etiqueta) ap.etiqueta = "Jugar";
+    if (!ap.monto) ap.monto = 500 * Number(ap.creditos || 1);
+    if (!ap.montoBase) ap.montoBase = ap.monto;
+    if (typeof ap.descripcion === "undefined") ap.descripcion = "";
+  }
+  if (!configGlobal.arcade.creditosPorPartida) configGlobal.arcade.creditosPorPartida = 1;
+  if (!configGlobal.arcade.nombre) configGlobal.arcade.nombre = "Galaga QR";
+  if (!configGlobal.arcade.titulo) configGlobal.arcade.titulo = "GALAGA QR";
+  if (!configGlobal.arcade.mensaje) configGlobal.arcade.mensaje = "Inserta creditos con Mercado Pago";
 
   delete configGlobal.planes;
   delete configGlobal.preciosExtra;
@@ -327,6 +372,7 @@ function cargarDatos() {
     if (!devices.ASPIRADORA_001) devices.ASPIRADORA_001 = nuevoDevice("premium");
     if (!devices.ASPIRADORA_BASIC_001) devices.ASPIRADORA_BASIC_001 = nuevoDevice("basic");
     if (!devices.GACHAPON_001) devices.GACHAPON_001 = nuevoDevice("gachapon");
+    if (!devices.GALAGA_001) devices.GALAGA_001 = nuevoDevice("arcade");
 
     console.log("Datos EVETEC cargados");
   } catch (err) {
@@ -339,6 +385,8 @@ cargarDatos();
 asegurarEstructuraConfig();
 if (!devices.GACHAPON_001) devices.GACHAPON_001 = nuevoDevice("gachapon");
 asegurarDevice("GACHAPON_001");
+if (!devices.GALAGA_001) devices.GALAGA_001 = nuevoDevice("arcade");
+asegurarDevice("GALAGA_001");
 
 function asegurarDevice(deviceId) {
   const id = String(deviceId || "ASPIRADORA_001").trim().toUpperCase() || "ASPIRADORA_001";
@@ -368,6 +416,7 @@ function asegurarDevice(deviceId) {
   if (!d.modoCobro) d.modoCobro = "owner_commission";
   if (!d.stats) d.stats = statsIniciales();
   if (!Array.isArray(d.stats.ultimosPagos)) d.stats.ultimosPagos = [];
+  if (d.tipo === "arcade" && typeof d.arcadeCredits === "undefined") d.arcadeCredits = 0;
 
   return d;
 }
@@ -429,6 +478,14 @@ function estadoOperativo(deviceId) {
     };
   }
 
+  if (d.tipo === "arcade" && !configGlobal.arcade.activo) {
+    return {
+      ok: false,
+      motivo: "arcade_desactivado",
+      mensaje: "Arcade desactivado temporalmente"
+    };
+  }
+
   return {
     ok: true,
     motivo: "ok",
@@ -464,7 +521,7 @@ function calcularComision(deviceId, monto, usandoOwner) {
 
   const porcentaje = Number(d.comisionEvetecPorcentaje || 0);
 
-  return Math.max(0, Math.round(Number(monto) * porcentaje / 100));
+  return Math.max(0, Math.round(Number(monto) * porcentaje) / 100);
 }
 
 function listaPlanesPremium() {
@@ -532,9 +589,52 @@ function buscarPlanGachapon(body) {
   return { ...plan };
 }
 
+function buscarPlanArcade(body) {
+  const planes = configGlobal.arcade.planes || [];
+  const planIndexRaw = body.plan_index ?? body.planIndex;
+  const planIndex = Number(planIndexRaw);
+  const planId = String(body.plan_id || body.id || "").toUpperCase();
+  const creditos = Number(body.creditos || 0);
+
+  let plan = null;
+
+  if (Number.isFinite(planIndex) && planIndex >= 0 && planIndex < planes.length) {
+    plan = planes[planIndex];
+  }
+
+  if (!plan && planId) {
+    plan = planes.find(p => String(p.id || "").toUpperCase() === planId);
+  }
+
+  if (!plan && creditos > 0) {
+    plan = planes.find(p => Number(p.creditos) === creditos);
+  }
+
+  if (!plan) plan = planes[0];
+
+  return { ...plan };
+}
+
 function normalizarPedidoPago(body) {
   const device_id = String(body.device_id || body.deviceId || "ASPIRADORA_001").toUpperCase();
   const d = asegurarDevice(device_id);
+
+  if (d.tipo === "arcade" || String(body.tipo || body.modo || "").toLowerCase().includes("arcade") || String(body.tipo || body.modo || "").toLowerCase().includes("galaga")) {
+    const plan = buscarPlanArcade(body);
+
+    return {
+      device_id,
+      modoSistema: "arcade",
+      plan_id: plan.id || `A${plan.creditos || 1}`,
+      plan_nombre: plan.nombre || `${plan.creditos || 1} CREDITO`,
+      origen: "arcade",
+      monto: Number(plan.monto || plan.precio || body.monto || 500),
+      segundos: 1,
+      motor_ms: 0,
+      creditos: Number(plan.creditos || body.creditos || 1),
+      etiqueta: plan.etiqueta || ""
+    };
+  }
 
   if (d.tipo === "gachapon" || String(body.tipo || body.modo || "").toLowerCase().includes("gachapon")) {
     const plan = buscarPlanGachapon(body);
@@ -608,32 +708,6 @@ app.get("/config/:deviceId", (req, res) => {
       instruccion: g.instruccion || "Toca una opcion",
       pulso_motor_ms: Number(g.pulso_motor_ms || 10000),
       pausa_premios_ms: Number(g.pausa_premios_ms || 650),
-      direccion_motor: boolFlexible(g.direccion_motor, true),
-      motor_direccion: boolFlexible(g.direccion_motor, true),
-      direccion: boolFlexible(g.direccion_motor, true),
-      invertir_giro: !boolFlexible(g.direccion_motor, true),
-      dir_pin_level: boolFlexible(g.direccion_motor, true) ? "HIGH" : "LOW",
-      velocidad_motor_us: Number(g.velocidad_motor_us || 1000),
-      motor_velocidad_us: Number(g.velocidad_motor_us || 1000),
-      velocidad_us: Number(g.velocidad_motor_us || 1000),
-      pasos1: Number(g.pasos1 || g.planes?.[0]?.pasos_motor || 200),
-      pasos2: Number(g.pasos2 || g.planes?.[1]?.pasos_motor || 400),
-      pasos3: Number(g.pasos3 || g.planes?.[2]?.pasos_motor || 600),
-      motor_pasos1: Number(g.pasos1 || g.planes?.[0]?.pasos_motor || 200),
-      motor_pasos2: Number(g.pasos2 || g.planes?.[1]?.pasos_motor || 400),
-      motor_pasos3: Number(g.pasos3 || g.planes?.[2]?.pasos_motor || 600),
-      precio1_x: Number(g.precio1_x ?? 140),
-      precio1_y: Number(g.precio1_y ?? 381),
-      precio2_x: Number(g.precio2_x ?? 255),
-      precio2_y: Number(g.precio2_y ?? 381),
-      precio3_x: Number(g.precio3_x ?? 368),
-      precio3_y: Number(g.precio3_y ?? 381),
-      qr_pago_cx: Number(g.qr_pago_cx ?? 240),
-      qr_pago_cy: Number(g.qr_pago_cy ?? 242),
-      qr_pago_scale: Number(g.qr_pago_scale ?? 4),
-      qr_owner_cx: Number(g.qr_owner_cx ?? 240),
-      qr_owner_cy: Number(g.qr_owner_cy ?? 270),
-      qr_owner_scale: Number(g.qr_owner_scale ?? 5),
       giro1_ms: Number(g.planes?.[0]?.giro_ms || 10000),
       giro2_ms: Number(g.planes?.[1]?.giro_ms || 20000),
       giro3_ms: Number(g.planes?.[2]?.giro_ms || 30000),
@@ -643,7 +717,7 @@ app.get("/config/:deviceId", (req, res) => {
       precio1: Number(g.planes?.[0]?.monto || 1000),
       precio2: Number(g.planes?.[1]?.monto || 1800),
       precio3: Number(g.planes?.[2]?.monto || 2500),
-      planes: (g.planes || []).slice(0, 3).map((p, idx) => ({
+      planes: (g.planes || []).slice(0, 3).map(p => ({
         id: p.id,
         creditos: Number(p.creditos || 1),
         nombre: p.nombre,
@@ -653,11 +727,6 @@ app.get("/config/:deviceId", (req, res) => {
         giro_ms: Number(p.giro_ms || 10000),
         tiempo_giro_ms: Number(p.giro_ms || 10000),
         motor_ms: Number(p.giro_ms || 10000),
-        pasos: Number(p.pasos_motor || g[`pasos${idx + 1}`] || 200 * (idx + 1)),
-        pasos_motor: Number(p.pasos_motor || g[`pasos${idx + 1}`] || 200 * (idx + 1)),
-        motor_pasos: Number(p.pasos_motor || g[`pasos${idx + 1}`] || 200 * (idx + 1)),
-        precio_x: Number(p.precio_x ?? g[`precio${idx + 1}_x`] ?? 0),
-        precio_y: Number(p.precio_y ?? g[`precio${idx + 1}_y`] ?? 0),
         descripcion: p.descripcion || ""
       })),
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
@@ -682,6 +751,36 @@ app.get("/config/:deviceId", (req, res) => {
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
       modoCobro: d.modoCobro,
       mantenimiento: d.modoMantenimiento,
+      serverTime: new Date().toISOString()
+    });
+  }
+
+  if (d.tipo === "arcade") {
+    const a = configGlobal.arcade;
+    return res.json({
+      ok: true,
+      tipo: "arcade",
+      activo: operativo.ok,
+      motivo: operativo.motivo,
+      mantenimiento: Boolean(d.modoMantenimiento),
+      mensaje: operativo.ok ? (a.mensaje || "Inserta creditos con Mercado Pago") : operativo.mensaje,
+      nombre: a.nombre || "Galaga QR",
+      titulo: a.titulo || "GALAGA QR",
+      instruccion: "Toca un pack y paga con QR",
+      creditosPorPartida: Number(a.creditosPorPartida || 1),
+      creditosDisponibles: Number(d.arcadeCredits || 0),
+      planes: (a.planes || []).slice(0, 3).map(p => ({
+        id: p.id,
+        creditos: Number(p.creditos || 1),
+        nombre: p.nombre,
+        etiqueta: p.etiqueta,
+        monto: Number(p.monto || 0),
+        precio: Number(p.monto || 0),
+        descripcion: p.descripcion || ""
+      })),
+      ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      modoCobro: d.modoCobro,
+      comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
       serverTime: new Date().toISOString()
     });
   }
@@ -732,7 +831,7 @@ app.post("/heartbeat", (req, res) => {
 // LOG DE PAGOS DESDE ESP32
 // =====================================================
 
-app.post("/device/payment-log", (req, res) => {
+app.post("/device/payment-log", requireDevice, (req, res) => {
   try {
     const device_id = String(req.body.device_id || req.body.deviceId || "ASPIRADORA_001").toUpperCase();
     const monto = Number(req.body.monto || 0);
@@ -832,7 +931,10 @@ async function crearPagoMercadoPago(pedido) {
       neto_duenio_estimado: netoDuenioEstimado,
       modo_cobro: d.modoCobro,
       owner_linked: Boolean(d.ownerLinked)
-    }
+    },
+    expires: true,
+    expiration_date_from: new Date().toISOString(),
+    expiration_date_to: new Date(Date.now() + 10 * 60 * 1000).toISOString()
   };
 
   if (comision > 0) {
@@ -960,6 +1062,129 @@ app.post("/basic/crear-pago", async (req, res) => {
   }
 });
 
+app.get("/qr-data", async (req, res) => {
+  try {
+    const text = String(req.query.text || "");
+    if (!text) {
+      return res.json({ ok: false, error: "Falta texto para QR" });
+    }
+
+    const dataUrl = await QRCode.toDataURL(text, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      scale: 8
+    });
+
+    res.json({ ok: true, dataUrl });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/arcade/claim-payment", async (req, res) => {
+  try {
+    const id = req.body.id || req.body.payment_id || req.body.paymentId;
+    if (!id) {
+      return res.json({ ok: false, estado: "pending", error: "sin_id", creditos: 0 });
+    }
+
+    const estado = await buscarEstadoMercadoPago(id);
+    const pagoLocal = pagosCreados[id] || pagosCreados[estado.payment_id];
+
+    if (estado.estado !== "approved") {
+      return res.json({
+        ok: false,
+        estado: estado.estado,
+        status: estado.status,
+        detalle: estado.detalle,
+        creditos: 0
+      });
+    }
+
+    if (!pagoLocal) {
+      return res.json({ ok: false, estado: "approved", error: "pago_no_encontrado", creditos: 0 });
+    }
+
+    if (pagoLocal.arcadeClaimed) {
+      return res.json({ ok: true, estado: "approved", alreadyClaimed: true, creditos: 0 });
+    }
+
+    pagoLocal.arcadeClaimed = true;
+    pagoLocal.estado = "approved";
+    pagoLocal.actualizado = new Date().toISOString();
+
+    const creditos = Number(pagoLocal.creditos || estado.creditos || 0);
+    const monto = Number(pagoLocal.monto || estado.monto || 0);
+    const device_id = pagoLocal.device_id || "GALAGA_001";
+    const d = asegurarDevice(device_id);
+
+    d.arcadeCredits = Number(d.arcadeCredits || 0) + creditos;
+    d.stats.totalRecaudado += monto;
+    d.stats.pagosAprobados += 1;
+    d.stats.segundosVendidos += Number(pagoLocal.segundos || 0);
+    d.stats.creditosVendidos = Number(d.stats.creditosVendidos || 0) + creditos;
+    d.stats.ultimosPagos.unshift({
+      monto,
+      segundos: Number(pagoLocal.segundos || 0),
+      creditos,
+      motor_ms: 0,
+      fecha: new Date().toISOString(),
+      tipo: "arcade"
+    });
+    d.stats.ultimosPagos = d.stats.ultimosPagos.slice(0, 30);
+
+    guardarDatos();
+
+    res.json({
+      ok: true,
+      estado: "approved",
+      creditos,
+      creditosDisponibles: Number(d.arcadeCredits || 0),
+      monto,
+      device_id
+    });
+  } catch (err) {
+    console.error("Error /arcade/claim-payment:", err.message);
+    res.json({ ok: false, estado: "pending", error: err.message, creditos: 0 });
+  }
+});
+
+app.get("/arcade/state/:deviceId", (req, res) => {
+  const device_id = String(req.params.deviceId || "GALAGA_001").toUpperCase();
+  const d = asegurarDevice(device_id);
+  const operativo = estadoOperativo(device_id);
+
+  res.json({
+    ok: true,
+    activo: operativo.ok,
+    motivo: operativo.motivo,
+    mensaje: operativo.mensaje,
+    device_id,
+    creditos: Number(d.arcadeCredits || 0),
+    creditosPorPartida: Number(configGlobal.arcade.creditosPorPartida || 1)
+  });
+});
+
+app.post("/arcade/consume-credit", (req, res) => {
+  const device_id = String(req.body.device_id || req.body.deviceId || "GALAGA_001").toUpperCase();
+  const d = asegurarDevice(device_id);
+  const operativo = estadoOperativo(device_id);
+  const costo = Math.max(1, Number(configGlobal.arcade.creditosPorPartida || 1));
+
+  if (!operativo.ok) {
+    return res.json({ ok: false, creditos: Number(d.arcadeCredits || 0), error: operativo.mensaje });
+  }
+
+  if (Number(d.arcadeCredits || 0) < costo) {
+    return res.json({ ok: false, creditos: Number(d.arcadeCredits || 0), error: "creditos_insuficientes" });
+  }
+
+  d.arcadeCredits = Number(d.arcadeCredits || 0) - costo;
+  guardarDatos();
+
+  res.json({ ok: true, creditos: Number(d.arcadeCredits || 0), costo });
+});
+
 // =====================================================
 // MERCADO PAGO - ESTADO DEL PAGO
 // =====================================================
@@ -1004,20 +1229,32 @@ async function buscarEstadoMercadoPago(id) {
 
       const estado = pago.status || "pending";
       const detalle = pago.status_detail || "";
+      const referenciaValida = String(pago.external_reference || "") === String(externalRef);
+      const montoEsperado = Number(pagoLocal?.monto || 0);
+      const montoValido = montoEsperado > 0 &&
+        Math.abs(Number(pago.transaction_amount || 0) - montoEsperado) < 0.001;
+      const monedaValida = String(pago.currency_id || "") === String(configGlobal.moneda || "ARS");
+      const verificado = referenciaValida && montoValido && monedaValida;
+      const estadoSeguro = estado === "approved" && !verificado ? "invalid" : estado;
 
       if (pagoLocal) {
-        pagoLocal.estado = estado;
+        pagoLocal.estado = estadoSeguro;
         pagoLocal.payment_id = pago.id;
         pagoLocal.detalle = detalle;
+        pagoLocal.verificado = verificado;
         pagoLocal.actualizado = new Date().toISOString();
         guardarDatos();
       }
 
       return {
-        estado,
-        status: estado,
+        estado: estadoSeguro,
+        status: estadoSeguro,
         detalle,
         payment_id: pago.id,
+        verificado,
+        external_reference: pago.external_reference || "",
+        moneda: pago.currency_id || "",
+        monto_verificado: Number(pago.transaction_amount || 0),
         segundos: pagoLocal?.segundos || pago.metadata?.segundos || 0,
         motor_ms: pagoLocal?.motor_ms || pago.metadata?.motor_ms || 0,
         creditos: pagoLocal?.creditos || pago.metadata?.creditos || 0,
@@ -1089,6 +1326,87 @@ app.get("/estado-pago", async (req, res) => {
   }
 });
 
+function registrarPagoVerificado(pagoLocal, paymentId) {
+  if (!pagoLocal || pagoLocal.estadisticasRegistradas) return;
+
+  const d = asegurarDevice(pagoLocal.device_id);
+  const monto = Number(pagoLocal.monto || 0);
+  const segundos = Number(pagoLocal.segundos || 0);
+  const creditos = Number(pagoLocal.creditos || 0);
+  const motorMs = Number(pagoLocal.motor_ms || 0);
+
+  d.stats.totalRecaudado += monto;
+  d.stats.pagosAprobados += 1;
+  d.stats.segundosVendidos += segundos;
+  d.stats.tiempoMotor += segundos;
+  d.stats.creditosVendidos = Number(d.stats.creditosVendidos || 0) + creditos;
+  d.stats.motorMsVendidos = Number(d.stats.motorMsVendidos || 0) + motorMs;
+  d.stats.ultimosPagos.unshift({
+    payment_id: paymentId || pagoLocal.payment_id || null,
+    monto,
+    segundos,
+    creditos,
+    motor_ms: motorMs,
+    fecha: new Date().toISOString(),
+    tipo: d.tipo
+  });
+  d.stats.ultimosPagos = d.stats.ultimosPagos.slice(0, 30);
+  pagoLocal.estadisticasRegistradas = true;
+}
+
+app.post("/device/claim-payment", requireDevice, async (req, res) => {
+  try {
+    const deviceId = String(req.body.device_id || req.body.deviceId || "").trim().toUpperCase();
+    const id = String(req.body.payment_id || req.body.paymentId || req.body.id || "").trim();
+    const pagoLocal = pagosCreados[id];
+
+    if (!deviceId || !id || !pagoLocal || pagoLocal.device_id !== deviceId) {
+      return res.status(404).json({ ok: false, activate: false, status: "not_found" });
+    }
+
+    const creadoMs = Date.parse(pagoLocal.creado || "");
+    if (!Number.isFinite(creadoMs) || Date.now() - creadoMs > 20 * 60 * 1000) {
+      return res.json({ ok: true, activate: false, status: "expired" });
+    }
+
+    const estado = await buscarEstadoMercadoPago(id);
+    if (estado.estado !== "approved" || !estado.verificado) {
+      return res.json({
+        ok: true,
+        activate: false,
+        status: estado.estado || "pending",
+        detail: estado.detalle || ""
+      });
+    }
+
+    if (pagoLocal.consumidoAt) {
+      return res.json({
+        ok: true,
+        activate: false,
+        status: "consumed",
+        consumed_at: pagoLocal.consumidoAt
+      });
+    }
+
+    pagoLocal.consumidoAt = new Date().toISOString();
+    pagoLocal.consumidoPor = deviceId;
+    registrarPagoVerificado(pagoLocal, estado.payment_id);
+    guardarDatos();
+
+    return res.json({
+      ok: true,
+      activate: true,
+      status: "approved",
+      payment_id: estado.payment_id,
+      monto: Number(pagoLocal.monto || 0),
+      segundos: Math.max(1, Math.min(3600, Number(pagoLocal.segundos || 0)))
+    });
+  } catch (err) {
+    console.error("Error /device/claim-payment:", err.message);
+    return res.status(500).json({ ok: false, activate: false, status: "server_error" });
+  }
+});
+
 // =====================================================
 // OAUTH MERCADO PAGO - VINCULAR DUEÑO
 // =====================================================
@@ -1107,12 +1425,18 @@ app.get("/oauth/link/:deviceId", (req, res) => {
       });
     }
 
+    const stateToken = crypto.randomBytes(24).toString("hex");
+    oauthStates.set(stateToken, { deviceId, expiresAt: Date.now() + 10 * 60 * 1000 });
+    for (const [key, value] of oauthStates) {
+      if (value.expiresAt < Date.now()) oauthStates.delete(key);
+    }
+
     const url =
       "https://auth.mercadopago.com.ar/authorization" +
       `?response_type=code` +
       `&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
       `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-      `&state=${encodeURIComponent(deviceId)}`;
+      `&state=${encodeURIComponent(stateToken)}`;
 
     const qr = generarQRMatrix(url);
 
@@ -1134,7 +1458,12 @@ app.get("/oauth/link/:deviceId", (req, res) => {
 
 app.get("/oauth/callback", async (req, res) => {
   const code = req.query.code;
-  const deviceId = String(req.query.state || "").toUpperCase();
+  const stateToken = String(req.query.state || "");
+  const stateData = oauthStates.get(stateToken);
+  oauthStates.delete(stateToken);
+  const deviceId = stateData && stateData.expiresAt >= Date.now()
+    ? String(stateData.deviceId || "").toUpperCase()
+    : "";
 
   if (!code || !deviceId) {
     return res.send("<h2>Sistema</h2><p>Faltan datos de autorización.</p>");
@@ -1207,7 +1536,7 @@ app.get("/oauth/callback", async (req, res) => {
   }
 });
 
-app.post("/unlink-owner/:deviceId", (req, res) => {
+app.post("/unlink-owner/:deviceId", requireAdmin, (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
 
   d.ownerLinked = false;
@@ -1224,17 +1553,253 @@ app.post("/unlink-owner/:deviceId", (req, res) => {
 app.get("/owner-status/:deviceId", (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
 
-  // La vinculacion solo se pierde si se toca "Desvincular MP" desde el panel.
-  // El ESP32 tambien guarda cache local para no pedir vinculacion en cada encendido.
   res.json({
     ok: true,
     linked: Boolean(d.ownerLinked && d.ownerAccessToken),
     ownerUserId: d.ownerUserId || null,
     tipo: d.tipo,
     modoCobro: d.modoCobro,
-    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
-    seDesvinculaSoloDesdePanel: true
+    comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
   });
+});
+
+app.get("/galaga", (req, res) => {
+  asegurarDevice("GALAGA_001");
+  const arcade = configGlobal.arcade;
+  const planes = (arcade.planes || []).slice(0, 3);
+
+  res.send(`<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>${escaparHtml(arcade.titulo || "GALAGA QR")}</title>
+  <style>
+    *{box-sizing:border-box} html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#05070d;color:#f8fafc;font-family:Arial,Helvetica,sans-serif}
+    body{display:grid;place-items:center}
+    .shell{position:relative;width:100vw;height:100vh;background:radial-gradient(circle at 50% 18%,#17324e 0,#07101f 38%,#02040a 100%)}
+    canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
+    .hud{position:absolute;inset:0;pointer-events:none;padding:14px;display:flex;justify-content:space-between;align-items:flex-start;font-weight:800;text-shadow:0 2px 8px #000}
+    .hud div{background:rgba(1,8,18,.58);border:1px solid rgba(125,211,252,.28);border-radius:8px;padding:8px 10px}
+    .center{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}
+    .panel{width:min(560px,92vw);background:rgba(2,8,23,.88);border:1px solid rgba(56,189,248,.45);border-radius:8px;padding:18px;box-shadow:0 24px 80px rgba(0,0,0,.5);text-align:center;pointer-events:auto}
+    h1{margin:0 0 6px;font-size:36px;letter-spacing:0;color:#facc15} p{margin:8px 0;color:#cbd5e1}
+    .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+    button{border:0;border-radius:8px;background:#22d3ee;color:#001018;font-weight:900;padding:12px 10px;cursor:pointer}
+    button.secondary{background:#111827;color:#e2e8f0;border:1px solid #334155}
+    button.start{background:#22c55e;color:#02140a;font-size:18px;margin-top:12px;width:100%}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    .small{font-size:13px;color:#94a3b8}.qr{width:min(280px,70vw);height:min(280px,70vw);background:white;margin:12px auto;padding:10px;border-radius:8px}
+    .qr img{width:100%;height:100%;display:block}.hidden{display:none}.status{min-height:22px;color:#facc15;font-weight:800}
+    @media (max-width:620px){.plans{grid-template-columns:1fr} h1{font-size:28px}.hud{font-size:13px;padding:8px}.hud div{padding:6px 7px}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <canvas id="game" width="480" height="720"></canvas>
+    <div class="hud">
+      <div>PUNTOS <span id="score">0</span></div>
+      <div>CREDITOS <span id="credits">0</span></div>
+      <div>VIDAS <span id="lives">3</span></div>
+    </div>
+    <div class="center" id="menu">
+      <div class="panel">
+        <h1>${escaparHtml(arcade.titulo || "GALAGA QR")}</h1>
+        <p>${escaparHtml(arcade.mensaje || "Inserta creditos con Mercado Pago")}</p>
+        <p class="small">Joystick USB: mover con eje horizontal, disparar con boton 0. Teclado: flechas/A-D y Espacio.</p>
+        <button class="start" id="startBtn">JUGAR (${Number(arcade.creditosPorPartida || 1)} CREDITO)</button>
+        <div class="plans">
+          ${planes.map((p, i) => `<button data-plan="${i}">${escaparHtml(p.nombre || (p.creditos + " CREDITOS"))}<br>$${formatoDinero(p.monto)}<br><span class="small">${escaparHtml(p.etiqueta || "")}</span></button>`).join("")}
+        </div>
+        <p class="status" id="payStatus"></p>
+      </div>
+    </div>
+    <div class="center hidden" id="payModal">
+      <div class="panel">
+        <h1>PAGAR QR</h1>
+        <p id="payTitle">Escanea y paga</p>
+        <div class="qr" id="qrBox"></div>
+        <p class="status" id="qrStatus">Esperando pago...</p>
+        <button class="secondary" id="closePay">Cerrar</button>
+      </div>
+    </div>
+  </div>
+  <script>
+  (function(){
+    const DEVICE_ID = 'GALAGA_001';
+    const COST = ${Number(arcade.creditosPorPartida || 1)};
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    const scoreEl = document.getElementById('score');
+    const creditsEl = document.getElementById('credits');
+    const livesEl = document.getElementById('lives');
+    const menu = document.getElementById('menu');
+    const payModal = document.getElementById('payModal');
+    const qrBox = document.getElementById('qrBox');
+    const qrStatus = document.getElementById('qrStatus');
+    const payTitle = document.getElementById('payTitle');
+    const payStatus = document.getElementById('payStatus');
+    const keys = {};
+    let credits = 0;
+    let score = 0, lives = 3, level = 1, playing = false, over = false;
+    let stars = [], enemies = [], bullets = [], enemyBullets = [], particles = [];
+    let player = {x:W/2,y:H-64,w:34,h:34,cool:0,inv:0};
+    let pollTimer = null, lastShot = false;
+
+    function saveCredits(){ creditsEl.textContent = credits; }
+    async function refreshCredits(){
+      try {
+        const state = await fetch('/arcade/state/' + DEVICE_ID).then(x=>x.json());
+        credits = Number(state.creditos || 0);
+        saveCredits();
+      } catch (err) {}
+    }
+    function rnd(a,b){ return a + Math.random() * (b-a); }
+    function resetStars(){ stars = Array.from({length:90}, () => ({x:rnd(0,W), y:rnd(0,H), z:rnd(.4,1.8)})); }
+    function spawnWave(){
+      enemies = [];
+      const rows = Math.min(5, 3 + Math.floor(level/2));
+      const cols = 8;
+      for(let r=0;r<rows;r++){
+        for(let c=0;c<cols;c++){
+          enemies.push({x:54+c*52,y:64+r*42,baseX:54+c*52,baseY:64+r*42,w:28,h:24,hp:r===0?2:1,t:r*9+c*3,diving:false});
+        }
+      }
+    }
+    async function newGame(){
+      const consume = await fetch('/arcade/consume-credit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:DEVICE_ID})}).then(x=>x.json()).catch(err => ({ok:false,error:err.message}));
+      if(!consume.ok){ credits = Number(consume.creditos || credits || 0); saveCredits(); payStatus.textContent = consume.error === 'creditos_insuficientes' ? 'Faltan creditos' : (consume.error || 'No se pudo iniciar'); return; }
+      credits = Number(consume.creditos || 0); saveCredits();
+      score = 0; lives = 3; level = 1; playing = true; over = false;
+      player = {x:W/2,y:H-64,w:34,h:34,cool:0,inv:80};
+      bullets = []; enemyBullets = []; particles = [];
+      spawnWave(); menu.classList.add('hidden'); updateHud();
+    }
+    function updateHud(){ scoreEl.textContent = score; livesEl.textContent = lives; creditsEl.textContent = credits; }
+    function hit(a,b){ return Math.abs(a.x-b.x)*2 < (a.w+b.w) && Math.abs(a.y-b.y)*2 < (a.h+b.h); }
+    function boom(x,y,color){
+      for(let i=0;i<12;i++) particles.push({x,y,vx:rnd(-3,3),vy:rnd(-3,3),life:rnd(18,36),color});
+    }
+    function input(){
+      let move = 0, fire = false;
+      if(keys.ArrowLeft || keys.KeyA) move -= 1;
+      if(keys.ArrowRight || keys.KeyD) move += 1;
+      if(keys.Space || keys.Enter) fire = true;
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      for(const pad of pads){
+        if(!pad) continue;
+        const ax = pad.axes[0] || 0;
+        if(Math.abs(ax) > .22) move += ax;
+        fire = fire || (pad.buttons[0] && pad.buttons[0].pressed) || (pad.buttons[1] && pad.buttons[1].pressed);
+      }
+      player.x += Math.max(-1, Math.min(1, move)) * 6.2;
+      player.x = Math.max(22, Math.min(W-22, player.x));
+      if(fire && !lastShot && player.cool <= 0 && playing){
+        bullets.push({x:player.x,y:player.y-22,w:5,h:16,vy:-9});
+        player.cool = 10;
+      }
+      lastShot = fire;
+    }
+    function update(){
+      stars.forEach(s => { s.y += s.z * (playing ? 2.2 : 1); if(s.y > H){s.y=0;s.x=rnd(0,W);} });
+      if(!playing) return;
+      input();
+      if(player.cool>0) player.cool--; if(player.inv>0) player.inv--;
+      bullets.forEach(b => b.y += b.vy); bullets = bullets.filter(b => b.y > -30);
+      enemyBullets.forEach(b => b.y += b.vy); enemyBullets = enemyBullets.filter(b => b.y < H+40);
+      const wave = Math.sin(Date.now()/520) * (20 + level*2);
+      enemies.forEach(e => {
+        e.t += .04;
+        e.x = e.baseX + wave + Math.sin(e.t) * 10;
+        e.y = e.baseY + Math.sin(e.t*.7) * 8;
+        if(Math.random() < 0.0018 + level*0.0007) enemyBullets.push({x:e.x,y:e.y+18,w:6,h:14,vy:3.1+level*.25});
+      });
+      for(const b of bullets){
+        for(const e of enemies){
+          if(!e.dead && hit(b,e)){
+            b.dead = true; e.hp--; boom(b.x,b.y,'#fde047');
+            if(e.hp <= 0){ e.dead = true; score += 120 + level*15; boom(e.x,e.y,'#fb7185'); }
+            break;
+          }
+        }
+      }
+      bullets = bullets.filter(b => !b.dead);
+      enemies = enemies.filter(e => !e.dead);
+      for(const b of enemyBullets){
+        if(player.inv <= 0 && hit(player,b)){
+          b.dead = true; lives--; player.inv = 110; boom(player.x,player.y,'#38bdf8');
+          if(lives <= 0){ playing = false; over = true; menu.classList.remove('hidden'); payStatus.textContent = 'Fin de partida. Puntos: ' + score; }
+        }
+      }
+      enemyBullets = enemyBullets.filter(b => !b.dead);
+      particles.forEach(p => {p.x+=p.vx;p.y+=p.vy;p.vy+=.04;p.life--;});
+      particles = particles.filter(p => p.life > 0);
+      if(enemies.length === 0){ level++; spawnWave(); player.inv = 70; }
+      updateHud();
+    }
+    function drawShip(x,y,blink){
+      if(blink && Math.floor(Date.now()/90)%2) return;
+      ctx.fillStyle = '#38bdf8'; ctx.beginPath(); ctx.moveTo(x,y-22); ctx.lineTo(x-18,y+18); ctx.lineTo(x,y+10); ctx.lineTo(x+18,y+18); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#facc15'; ctx.fillRect(x-5,y-4,10,14);
+    }
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      ctx.fillStyle = '#020617'; ctx.fillRect(0,0,W,H);
+      stars.forEach(s => { ctx.fillStyle = s.z > 1.2 ? '#e0f2fe' : '#64748b'; ctx.fillRect(s.x,s.y,s.z*1.6,s.z*1.6); });
+      ctx.strokeStyle = 'rgba(34,211,238,.18)'; for(let y=0;y<H;y+=48){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+      enemies.forEach(e => {
+        ctx.fillStyle = e.hp > 1 ? '#f97316' : '#a78bfa';
+        ctx.beginPath(); ctx.ellipse(e.x,e.y,17,12,0,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#22c55e'; ctx.fillRect(e.x-18,e.y+4,36,6);
+        ctx.fillStyle = '#020617'; ctx.fillRect(e.x-7,e.y-3,5,5); ctx.fillRect(e.x+3,e.y-3,5,5);
+      });
+      ctx.fillStyle = '#f8fafc'; bullets.forEach(b => ctx.fillRect(b.x-2,b.y-8,b.w,b.h));
+      ctx.fillStyle = '#fb7185'; enemyBullets.forEach(b => ctx.fillRect(b.x-3,b.y-7,b.w,b.h));
+      drawShip(player.x, player.y, player.inv > 0);
+      particles.forEach(p => { ctx.globalAlpha = Math.max(0,p.life/36); ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,4,4); ctx.globalAlpha=1; });
+      if(!playing){
+        ctx.fillStyle = 'rgba(2,6,23,.65)'; ctx.fillRect(0,0,W,H);
+        ctx.fillStyle = '#facc15'; ctx.font = 'bold 34px Arial'; ctx.textAlign = 'center'; ctx.fillText(over ? 'GAME OVER' : 'READY?', W/2, H/2-42);
+        ctx.fillStyle = '#e2e8f0'; ctx.font = '18px Arial'; ctx.fillText('Paga por QR o presiona JUGAR si tienes creditos', W/2, H/2);
+      }
+    }
+    function loop(){ update(); draw(); requestAnimationFrame(loop); }
+    async function buy(planIndex){
+      payStatus.textContent = 'Creando pago...';
+      const r = await fetch('/crear-pago',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:DEVICE_ID,tipo:'arcade',plan_index:planIndex})});
+      const data = await r.json();
+      if(!data.ok){ payStatus.textContent = data.error || 'No se pudo crear el pago'; return; }
+      payTitle.textContent = 'Paga $' + data.monto + ' y recibes ' + data.creditos + ' credito(s)';
+      qrBox.innerHTML = '';
+      const qr = await fetch('/qr-data?text=' + encodeURIComponent(data.link)).then(x=>x.json());
+      if(qr.ok){ qrBox.innerHTML = '<img alt="QR Mercado Pago" src="' + qr.dataUrl + '">'; }
+      qrStatus.textContent = 'Escanea el QR. Se acredita automatico al aprobar.';
+      payModal.classList.remove('hidden');
+      clearInterval(pollTimer);
+      pollTimer = setInterval(async () => {
+        const claim = await fetch('/arcade/claim-payment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:data.payment_id})}).then(x=>x.json());
+        if(claim.ok && claim.creditos > 0){
+          credits = Number(claim.creditosDisponibles ?? (credits + Number(claim.creditos || 0))); saveCredits();
+          qrStatus.textContent = 'Pago aprobado. Creditos cargados.';
+          payStatus.textContent = 'Creditos agregados: +' + claim.creditos;
+          clearInterval(pollTimer); setTimeout(()=>payModal.classList.add('hidden'),1200);
+        } else if(claim.estado && claim.estado !== 'pending'){
+          qrStatus.textContent = 'Estado: ' + claim.estado;
+        }
+      }, 3000);
+    }
+    document.addEventListener('keydown', e => { keys[e.code]=true; if((e.code==='Enter'||e.code==='Space') && !playing && menu.classList.contains('hidden')===false) newGame(); });
+    document.addEventListener('keyup', e => keys[e.code]=false);
+    document.getElementById('startBtn').addEventListener('click', newGame);
+    document.querySelectorAll('[data-plan]').forEach(btn => btn.addEventListener('click', () => buy(Number(btn.dataset.plan))));
+    document.getElementById('closePay').addEventListener('click', () => { payModal.classList.add('hidden'); clearInterval(pollTimer); });
+    window.addEventListener('gamepadconnected', e => { payStatus.textContent = 'Joystick conectado: ' + e.gamepad.id; });
+    resetStars(); refreshCredits(); updateHud(); loop();
+  })();
+  </script>
+</body>
+</html>`);
 });
 // =====================================================
 // ADMIN
@@ -1269,6 +1834,7 @@ app.get("/admin", (req, res) => {
       .basic{color:#60a5fa;font-weight:bold}
       .premium{color:#c084fc;font-weight:bold}
       .gachapon{color:#f97316;font-weight:bold}
+      .arcade{color:#facc15;font-weight:bold}
       .ok{color:#22c55e;font-weight:bold}
       .bad{color:#ef4444;font-weight:bold}
       table{width:100%;border-collapse:collapse}
@@ -1309,7 +1875,7 @@ app.get("/admin", (req, res) => {
     html += `
       <tr>
         <td><b>${escaparHtml(id)}</b></td>
-        <td class="${d.tipo === "basic" ? "basic" : (d.tipo === "gachapon" ? "gachapon" : "premium")}">${d.tipo === "basic" ? "BÁSICO" : (d.tipo === "gachapon" ? "GACHAPON" : "PREMIUM")}</td>
+        <td class="${claseTipoDevice(d.tipo)}">${etiquetaTipoDevice(d.tipo)}</td>
         <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
         <td class="money">$${formatoDinero(stats.totalRecaudado)}</td>
         <td>${stats.pagosAprobados || 0}</td>
@@ -1367,31 +1933,6 @@ app.get("/admin", (req, res) => {
         Instrucción:<input name="instruccion" value="${escaparHtml(configGlobal.gachapon.instruccion)}" size="24"><br>
         Pulso motor ms:<input name="pulso_motor_ms" value="${configGlobal.gachapon.pulso_motor_ms}" size="8">
         Pausa premios ms:<input name="pausa_premios_ms" value="${configGlobal.gachapon.pausa_premios_ms}" size="8"><br><br>
-        <b>Calibración NEMA17 + Pololu</b><br>
-        Dirección:
-        <select name="direccion_motor">
-          <option value="true" ${boolFlexible(configGlobal.gachapon.direccion_motor, true) ? "selected" : ""}>NORMAL / DIR HIGH</option>
-          <option value="false" ${!boolFlexible(configGlobal.gachapon.direccion_motor, true) ? "selected" : ""}>INVERSA / DIR LOW</option>
-        </select>
-        Velocidad us:<input name="velocidad_motor_us" value="${configGlobal.gachapon.velocidad_motor_us || 1000}" size="7"><br>
-        Pasos plan 1:<input name="pasos1" value="${configGlobal.gachapon.pasos1 || configGlobal.gachapon.planes?.[0]?.pasos_motor || 200}" size="7">
-        Pasos plan 2:<input name="pasos2" value="${configGlobal.gachapon.pasos2 || configGlobal.gachapon.planes?.[1]?.pasos_motor || 400}" size="7">
-        Pasos plan 3:<input name="pasos3" value="${configGlobal.gachapon.pasos3 || configGlobal.gachapon.planes?.[2]?.pasos_motor || 600}" size="7"><br>
-        <span class="small">Estos pasos son los que usa el ESP32 en STEP GPIO40 y DIR GPIO2. Si invertís dirección, el ESP32 cambia GPIO2 de HIGH a LOW en el próximo refresco de configuración.</span><br><br>
-        <b>Ajuste visual pantalla 480x480</b><br>
-        Precio 1 X:<input name="precio1_x" value="${configGlobal.gachapon.precio1_x}" size="5">
-        Y:<input name="precio1_y" value="${configGlobal.gachapon.precio1_y}" size="5">
-        Precio 2 X:<input name="precio2_x" value="${configGlobal.gachapon.precio2_x}" size="5">
-        Y:<input name="precio2_y" value="${configGlobal.gachapon.precio2_y}" size="5">
-        Precio 3 X:<input name="precio3_x" value="${configGlobal.gachapon.precio3_x}" size="5">
-        Y:<input name="precio3_y" value="${configGlobal.gachapon.precio3_y}" size="5"><br>
-        QR Pago CX:<input name="qr_pago_cx" value="${configGlobal.gachapon.qr_pago_cx}" size="5">
-        CY:<input name="qr_pago_cy" value="${configGlobal.gachapon.qr_pago_cy}" size="5">
-        Escala:<input name="qr_pago_scale" value="${configGlobal.gachapon.qr_pago_scale}" size="4">
-        QR Vinculación CX:<input name="qr_owner_cx" value="${configGlobal.gachapon.qr_owner_cx}" size="5">
-        CY:<input name="qr_owner_cy" value="${configGlobal.gachapon.qr_owner_cy}" size="5">
-        Escala:<input name="qr_owner_scale" value="${configGlobal.gachapon.qr_owner_scale}" size="4"><br>
-        <span class="small">CX/CY son el centro del QR. Para precios, subí/bajá Y y mové X hasta calzar con el fondo.</span><br><br>
   `;
 
   configGlobal.gachapon.planes.slice(0, 3).forEach((p, i) => {
@@ -1404,7 +1945,6 @@ app.get("/admin", (req, res) => {
         Etiqueta:<input name="etiqueta${i}" value="${escaparHtml(p.etiqueta || "")}" size="14">
         Precio:<input name="monto${i}" value="${p.monto}" size="7">
         Giro ms:<input name="giro_ms${i}" value="${p.giro_ms}" size="8">
-        Pasos:<input name="pasos_motor${i}" value="${p.pasos_motor || configGlobal.gachapon[`pasos${i + 1}`] || 200 * (i + 1)}" size="7">
         Desc:<input name="descripcion${i}" value="${escaparHtml(p.descripcion || "")}" size="18">
       </div>
     `;
@@ -1412,6 +1952,37 @@ app.get("/admin", (req, res) => {
 
   html += `
         <button class="save" type="submit">Guardar Gachapon</button>
+      </form>
+    </div>
+
+    <div class="box">
+      <h2>Arcade Galaga: creditos y QR</h2>
+      <p class="small">Pantalla jugable: <b>/galaga</b>. Cada partida descuenta los creditos configurados abajo.</p>
+      <form method="POST" action="/admin/arcade/update">
+        Activo:
+        <input type="checkbox" name="activo" ${configGlobal.arcade.activo ? "checked" : ""}><br>
+        Nombre:<input name="nombre" value="${escaparHtml(configGlobal.arcade.nombre)}" size="18">
+        Titulo:<input name="titulo" value="${escaparHtml(configGlobal.arcade.titulo)}" size="18">
+        Creditos por partida:<input name="creditosPorPartida" value="${configGlobal.arcade.creditosPorPartida}" size="4"><br>
+        Mensaje:<input name="mensaje" value="${escaparHtml(configGlobal.arcade.mensaje)}" size="48"><br><br>
+  `;
+
+  configGlobal.arcade.planes.slice(0, 3).forEach((p, i) => {
+    html += `
+      <div>
+        <b>Pack ${i + 1}</b>
+        ID:<input name="id${i}" value="${escaparHtml(p.id || "A" + (i + 1))}" size="5">
+        Creditos:<input name="creditos${i}" value="${p.creditos || i + 1}" size="4">
+        Nombre:<input name="nombre${i}" value="${escaparHtml(p.nombre)}" size="12">
+        Etiqueta:<input name="etiqueta${i}" value="${escaparHtml(p.etiqueta || "")}" size="14">
+        Precio:<input name="monto${i}" value="${p.monto}" size="7">
+        Desc:<input name="descripcion${i}" value="${escaparHtml(p.descripcion || "")}" size="18">
+      </div>
+    `;
+  });
+
+  html += `
+        <button class="save" type="submit">Guardar Arcade</button>
       </form>
     </div>
 
@@ -1514,7 +2085,7 @@ app.get("/admin", (req, res) => {
     html += `
       <tr>
         <td><b>${escaparHtml(id)}</b></td>
-        <td class="${d.tipo === "basic" ? "basic" : (d.tipo === "gachapon" ? "gachapon" : "premium")}">${d.tipo === "basic" ? "BÁSICO" : (d.tipo === "gachapon" ? "GACHAPON" : "PREMIUM")}</td>
+        <td class="${claseTipoDevice(d.tipo)}">${etiquetaTipoDevice(d.tipo)}</td>
         <td class="${d.online ? "online" : "offline"}">${d.online ? "ONLINE" : "OFFLINE"}</td>
         <td>${d.activo ? "SI" : "NO"}</td>
         <td>${d.modoMantenimiento ? "SI" : "NO"}</td>
@@ -1571,12 +2142,13 @@ app.get("/admin", (req, res) => {
       <h2>Agregar equipo</h2>
       <form method="POST" action="/admin/device/add">
         ID equipo:
-        <input name="deviceId" value="GACHAPON_001" size="24">
+        <input name="deviceId" value="GALAGA_001" size="24">
         Tipo:
         <select name="tipo">
           <option value="basic">Básico</option>
           <option value="premium">Premium</option>
           <option value="gachapon">Gachapon</option>
+          <option value="arcade">Arcade</option>
         </select>
         <button class="save" type="submit">Agregar</button>
       </form>
@@ -1682,25 +2254,6 @@ app.post("/admin/gachapon/update", (req, res) => {
   configGlobal.gachapon.pulso_motor_ms = Math.max(100, Math.min(120000, Number(req.body.pulso_motor_ms) || configGlobal.gachapon.pulso_motor_ms));
   configGlobal.gachapon.pausa_premios_ms = Math.max(0, Math.min(30000, Number(req.body.pausa_premios_ms) || configGlobal.gachapon.pausa_premios_ms));
 
-  configGlobal.gachapon.direccion_motor = boolFlexible(req.body.direccion_motor, boolFlexible(configGlobal.gachapon.direccion_motor, true));
-  configGlobal.gachapon.velocidad_motor_us = Math.max(150, Math.min(10000, Number(req.body.velocidad_motor_us) || configGlobal.gachapon.velocidad_motor_us || 1000));
-  configGlobal.gachapon.pasos1 = Math.max(1, Math.min(20000, Number(req.body.pasos1) || configGlobal.gachapon.pasos1 || 200));
-  configGlobal.gachapon.pasos2 = Math.max(1, Math.min(20000, Number(req.body.pasos2) || configGlobal.gachapon.pasos2 || 400));
-  configGlobal.gachapon.pasos3 = Math.max(1, Math.min(20000, Number(req.body.pasos3) || configGlobal.gachapon.pasos3 || 600));
-
-  configGlobal.gachapon.precio1_x = Math.max(0, Math.min(480, Number(req.body.precio1_x) || configGlobal.gachapon.precio1_x));
-  configGlobal.gachapon.precio1_y = Math.max(0, Math.min(480, Number(req.body.precio1_y) || configGlobal.gachapon.precio1_y));
-  configGlobal.gachapon.precio2_x = Math.max(0, Math.min(480, Number(req.body.precio2_x) || configGlobal.gachapon.precio2_x));
-  configGlobal.gachapon.precio2_y = Math.max(0, Math.min(480, Number(req.body.precio2_y) || configGlobal.gachapon.precio2_y));
-  configGlobal.gachapon.precio3_x = Math.max(0, Math.min(480, Number(req.body.precio3_x) || configGlobal.gachapon.precio3_x));
-  configGlobal.gachapon.precio3_y = Math.max(0, Math.min(480, Number(req.body.precio3_y) || configGlobal.gachapon.precio3_y));
-  configGlobal.gachapon.qr_pago_cx = Math.max(0, Math.min(480, Number(req.body.qr_pago_cx) || configGlobal.gachapon.qr_pago_cx));
-  configGlobal.gachapon.qr_pago_cy = Math.max(0, Math.min(480, Number(req.body.qr_pago_cy) || configGlobal.gachapon.qr_pago_cy));
-  configGlobal.gachapon.qr_pago_scale = Math.max(2, Math.min(7, Number(req.body.qr_pago_scale) || configGlobal.gachapon.qr_pago_scale));
-  configGlobal.gachapon.qr_owner_cx = Math.max(0, Math.min(480, Number(req.body.qr_owner_cx) || configGlobal.gachapon.qr_owner_cx));
-  configGlobal.gachapon.qr_owner_cy = Math.max(0, Math.min(480, Number(req.body.qr_owner_cy) || configGlobal.gachapon.qr_owner_cy));
-  configGlobal.gachapon.qr_owner_scale = Math.max(2, Math.min(7, Number(req.body.qr_owner_scale) || configGlobal.gachapon.qr_owner_scale));
-
   for (let i = 0; i < 3; i++) {
     if (!configGlobal.gachapon.planes[i]) configGlobal.gachapon.planes[i] = {};
     const p = configGlobal.gachapon.planes[i];
@@ -1711,8 +2264,29 @@ app.post("/admin/gachapon/update", (req, res) => {
     p.monto = Math.max(1, Number(req.body[`monto${i}`]) || p.monto || 1000);
     p.montoBase = p.montoBase || p.monto;
     p.giro_ms = Math.max(500, Math.min(120000, Number(req.body[`giro_ms${i}`]) || p.giro_ms || 10000));
-    p.pasos_motor = Math.max(1, Math.min(20000, Number(req.body[`pasos_motor${i}`]) || configGlobal.gachapon[`pasos${i + 1}`] || p.pasos_motor || 200 * (i + 1)));
-    configGlobal.gachapon[`pasos${i + 1}`] = p.pasos_motor;
+    p.descripcion = req.body[`descripcion${i}`] || p.descripcion || "";
+  }
+
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/arcade/update", (req, res) => {
+  configGlobal.arcade.activo = req.body.activo === "on";
+  configGlobal.arcade.nombre = req.body.nombre || configGlobal.arcade.nombre;
+  configGlobal.arcade.titulo = req.body.titulo || configGlobal.arcade.titulo;
+  configGlobal.arcade.mensaje = req.body.mensaje || configGlobal.arcade.mensaje;
+  configGlobal.arcade.creditosPorPartida = Math.max(1, Math.min(10, Number(req.body.creditosPorPartida) || configGlobal.arcade.creditosPorPartida || 1));
+
+  for (let i = 0; i < 3; i++) {
+    if (!configGlobal.arcade.planes[i]) configGlobal.arcade.planes[i] = {};
+    const p = configGlobal.arcade.planes[i];
+    p.id = String(req.body[`id${i}`] || p.id || `A${i + 1}`).toUpperCase();
+    p.creditos = Math.max(1, Math.min(99, Number(req.body[`creditos${i}`]) || p.creditos || i + 1));
+    p.nombre = req.body[`nombre${i}`] || p.nombre || `${p.creditos} CREDITO`;
+    p.etiqueta = req.body[`etiqueta${i}`] || p.etiqueta || "Jugar";
+    p.monto = Math.max(1, Number(req.body[`monto${i}`]) || p.monto || 500);
+    p.montoBase = p.montoBase || p.monto;
     p.descripcion = req.body[`descripcion${i}`] || p.descripcion || "";
   }
 
@@ -1792,7 +2366,7 @@ app.post("/admin/device/add", (req, res) => {
   const tipo = String(req.body.tipo || detectarTipoDevice(id)).toLowerCase();
 
   if (id) {
-    devices[id] = nuevoDevice(["basic", "premium", "gachapon"].includes(tipo) ? tipo : detectarTipoDevice(id));
+    devices[id] = nuevoDevice(["basic", "premium", "gachapon", "arcade"].includes(tipo) ? tipo : detectarTipoDevice(id));
   }
 
   guardarDatos();
@@ -1844,6 +2418,20 @@ app.post("/admin/device/:deviceId/billing", (req, res) => {
 // =====================================================
 
 app.get("/health", (req, res) => {
+  const deviceSummary = Object.fromEntries(
+    Object.entries(devices).map(([id, d]) => [id, {
+      tipo: d.tipo,
+      activo: Boolean(d.activo),
+      online: Boolean(d.online),
+      modoMantenimiento: Boolean(d.modoMantenimiento),
+      ultimaConexion: d.ultimaConexion || null,
+      ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      ownerUserId: d.ownerUserId || null,
+      modoCobro: d.modoCobro,
+      comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
+    }])
+  );
+
   res.json({
     ok: true,
     server: "DUAL_TIMERS_PREMIUM_BASIC",
@@ -1852,8 +2440,9 @@ app.get("/health", (req, res) => {
     mpClientId: Boolean(MP_CLIENT_ID),
     mpClientSecret: Boolean(MP_CLIENT_SECRET),
     fallbackToken: Boolean(EVETEC_MP_TOKEN),
-    configGlobal,
-    devices
+    adminProtected: Boolean(ADMIN_PASSWORD),
+    deviceApiProtected: Boolean(DEVICE_API_KEY),
+    devices: deviceSummary
   });
 });
 
