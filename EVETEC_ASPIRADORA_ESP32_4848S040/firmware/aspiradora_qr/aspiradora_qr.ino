@@ -18,6 +18,7 @@ constexpr int PIN_BACKLIGHT = 38;
 constexpr int TOUCH_SDA = 19;
 constexpr int TOUCH_SCL = 45;
 
+// Se conserva el ID productivo existente; toda la experiencia visible es de inflador.
 const char *DEVICE_ID = "ASPIRADORA_BASIC_001";
 const char *API_BASE = "https://evetec-api.onrender.com";
 const char *DEVICE_API_KEY = ""; // Debe coincidir con DEVICE_API_KEY del servidor.
@@ -72,7 +73,9 @@ enum UiState {
   UI_CREATING_PAYMENT,
   UI_WAITING_PAYMENT,
   UI_OWNER_LINK,
+  UI_PREPARING,
   UI_RUNNING,
+  UI_RELAY_TEST,
   UI_THANKS,
   UI_ERROR
 };
@@ -86,6 +89,9 @@ String ownerLink;
 String lastError;
 float servicePrice = 10.0f;
 uint32_t serviceSeconds = 240;
+uint32_t prestartSeconds = 15;
+uint32_t relayTestSeconds = 3;
+uint32_t pendingServiceSeconds = 240;
 bool serviceActive = true;
 bool ownerLinked = false;
 bool touchWasDown = false;
@@ -94,10 +100,14 @@ bool portalReconnectPending = false;
 uint32_t paymentStartedAt = 0;
 uint32_t lastPaymentPollAt = 0;
 uint32_t relayEndsAt = 0;
+uint32_t prestartEndsAt = 0;
+uint32_t relayTestEndsAt = 0;
 uint32_t thanksEndsAt = 0;
 uint32_t lastCountdownSecond = UINT32_MAX;
 uint32_t lastConfigRefreshAt = 0;
 uint32_t lastWifiRetryAt = 0;
+uint32_t lastAnimationAt = 0;
+uint8_t animationPhase = 0;
 
 void relayOff() {
   digitalWrite(PIN_RELAY, RELAY_ACTIVE_LEVEL == HIGH ? LOW : HIGH);
@@ -157,11 +167,48 @@ void clearScreen() {
   display->fillScreen(C_BG);
 }
 
+void drawTire(int cx, int cy, int radius, uint8_t phase, uint16_t accent = C_CYAN) {
+  display->fillCircle(cx, cy, radius + 5, C_BG);
+  display->fillCircle(cx, cy, radius, C_BLACK);
+  display->drawCircle(cx, cy, radius, C_MUTED);
+  display->drawCircle(cx, cy, radius - 5, C_PANEL_2);
+  display->fillCircle(cx, cy, radius - 20, C_PANEL);
+  display->drawCircle(cx, cy, radius - 20, accent);
+  display->fillCircle(cx, cy, 10, accent);
+
+  for (int i = 0; i < 6; i++) {
+    const float angle = (i * 60 + phase * 12) * DEG_TO_RAD;
+    const int x1 = cx + cosf(angle) * 14;
+    const int y1 = cy + sinf(angle) * 14;
+    const int x2 = cx + cosf(angle) * (radius - 24);
+    const int y2 = cy + sinf(angle) * (radius - 24);
+    display->drawLine(x1, y1, x2, y2, C_WHITE);
+  }
+
+  for (int i = 0; i < 8; i++) {
+    const float angle = (i * 45 + 8) * DEG_TO_RAD;
+    const int tx = cx + cosf(angle) * (radius - 2);
+    const int ty = cy + sinf(angle) * (radius - 2);
+    display->fillCircle(tx, ty, 2, C_MUTED);
+  }
+}
+
+void drawAirPulse(uint8_t phase) {
+  display->fillRect(25, 330, 430, 48, C_BG);
+  display->drawLine(55, 356, 405, 356, C_PANEL_2);
+  for (int i = 0; i < 5; i++) {
+    const int x = 70 + ((phase * 22 + i * 78) % 330);
+    const int y = 348 - (i % 2) * 10;
+    display->fillCircle(x, y, 4 + (i % 2), i == 4 ? C_GREEN : C_CYAN);
+  }
+  display->fillTriangle(405, 347, 405, 365, 430, 356, C_GREEN);
+}
+
 void showBoot(const String &message) {
   uiState = UI_BOOT;
   clearScreen();
   centerText("EVETEC", 110, 5, C_CYAN);
-  centerText("ASPIRADORA QR", 180, 3, C_WHITE);
+  centerText("INFLADOR QR", 180, 3, C_WHITE);
   centerText(message, 280, 2, C_MUTED);
 }
 
@@ -183,23 +230,28 @@ void showIdle() {
   paymentId = "";
   paymentLink = "";
   clearScreen();
-  header(serviceActive ? "LISTA PARA USAR" : "FUERA DE SERVICIO",
+  header(serviceActive ? "LISTO PARA USAR" : "FUERA DE SERVICIO",
          serviceActive ? C_GREEN : C_RED);
-  centerText("ASPIRADORA", 100, 5, C_WHITE);
-  centerText(durationText(serviceSeconds), 168, 3, C_CYAN);
-  centerText(moneyText(servicePrice), 220, 6, C_GOLD);
+  centerText("INFLADOR DE NEUMATICOS", 88, 2, C_WHITE);
+  drawTire(105, 190, 62, animationPhase);
+  textAt("TIEMPO", 215, 135, 1, C_MUTED);
+  textAt(durationText(serviceSeconds), 215, 158, 2, C_CYAN);
+  textAt("PRECIO", 215, 205, 1, C_MUTED);
+  textAt(moneyText(servicePrice), 215, 225, 5, C_GOLD);
 
-  if (serviceActive && WiFi.status() == WL_CONNECTED) {
-    button(48, 305, 384, 76, C_GREEN, "INICIAR", C_BG, 4);
+  if (!ownerLinked && WiFi.status() == WL_CONNECTED) {
+    centerText("Primero vincula la cuenta que cobrara", 278, 1, C_MUTED);
+    button(42, 300, 396, 76, C_CYAN, "VINCULAR CUENTA", C_BG, 3);
+  } else if (serviceActive && WiFi.status() == WL_CONNECTED) {
+    button(42, 300, 396, 76, C_GREEN, "INFLAR NEUMATICOS", C_BG, 3);
   } else {
-    button(48, 305, 384, 76, C_PANEL_2, "NO DISPONIBLE", C_MUTED, 2);
+    button(42, 300, 396, 76, C_PANEL_2, "NO DISPONIBLE", C_MUTED, 2);
   }
 
-  if (!ownerLinked) {
-    button(80, 404, 320, 48, C_PANEL_2, "VINCULAR MERCADO PAGO", C_WHITE, 1);
-  } else {
-    centerText("Cuenta Mercado Pago vinculada", 425, 1, C_MUTED);
-  }
+  textAt(ownerLinked ? "MP VINCULADO" : "SIN CUENTA MP", 28, 425, 1,
+         ownerLinked ? C_GREEN : C_GOLD);
+  button(290, 406, 162, 48, C_PANEL_2, "PROBAR RELE", C_WHITE, 1);
+  animationPhase++;
 }
 
 bool drawQr(const String &data, int centerX, int centerY, int maxPixels) {
@@ -260,6 +312,11 @@ void drawCountdown(uint32_t remaining) {
   centerText(value, 210, 7, C_WHITE);
 }
 
+void drawPrestartCountdown(uint32_t remaining) {
+  display->fillRect(155, 238, 170, 64, C_BG);
+  centerText(String(remaining), 242, 6, C_GOLD);
+}
+
 void startService(uint32_t seconds) {
   serviceSeconds = max<uint32_t>(1, min<uint32_t>(seconds, 3600));
   relayOn();
@@ -267,11 +324,47 @@ void startService(uint32_t seconds) {
   lastCountdownSecond = UINT32_MAX;
   uiState = UI_RUNNING;
   clearScreen();
-  header("PAGO APROBADO", C_GREEN);
-  centerText("ASPIRADORA ENCENDIDA", 115, 3, C_GREEN);
+  header("INFLADOR ACTIVO", C_GREEN);
+  centerText("INFLANDO NEUMATICOS", 112, 3, C_GREEN);
   centerText("Tiempo restante", 170, 2, C_MUTED);
   drawCountdown(serviceSeconds);
-  centerText("El equipo se apaga automaticamente", 375, 1, C_MUTED);
+  drawAirPulse(animationPhase++);
+  centerText("Se apaga automaticamente", 385, 1, C_MUTED);
+  button(150, 414, 180, 42, C_RED, "DETENER", C_WHITE, 1);
+}
+
+void startPreparation(uint32_t seconds) {
+  pendingServiceSeconds = max<uint32_t>(1, min<uint32_t>(seconds, 3600));
+  if (prestartSeconds == 0) {
+    startService(pendingServiceSeconds);
+    return;
+  }
+
+  relayOff();
+  prestartEndsAt = millis() + prestartSeconds * 1000UL;
+  lastCountdownSecond = UINT32_MAX;
+  uiState = UI_PREPARING;
+  clearScreen();
+  header("PAGO APROBADO", C_GREEN);
+  centerText("LISTO PARA USAR", 100, 4, C_GREEN);
+  centerText("Prepare la manguera", 160, 2, C_WHITE);
+  centerText("El inflador inicia en", 205, 2, C_MUTED);
+  drawPrestartCountdown(prestartSeconds);
+  drawTire(240, 350, 46, animationPhase, C_GREEN);
+  button(140, 420, 200, 38, C_GREEN, "INICIAR AHORA", C_BG, 1);
+}
+
+void startRelayTest() {
+  relayOn();
+  relayTestEndsAt = millis() + relayTestSeconds * 1000UL;
+  lastCountdownSecond = UINT32_MAX;
+  uiState = UI_RELAY_TEST;
+  clearScreen();
+  header("PRUEBA TECNICA", C_GOLD);
+  centerText("RELE GPIO 40 ACTIVO", 115, 3, C_GOLD);
+  centerText("Pulso de comprobacion", 175, 2, C_WHITE);
+  drawCountdown(relayTestSeconds);
+  button(130, 390, 220, 58, C_RED, "APAGAR AHORA", C_WHITE, 2);
 }
 
 void showThanks() {
@@ -352,6 +445,8 @@ bool fetchRemoteConfig(bool redraw = false) {
   serviceActive = doc["activo"] | false;
   servicePrice = doc["monto"] | doc["precio"] | servicePrice;
   serviceSeconds = doc["segundos"] | serviceSeconds;
+  prestartSeconds = constrain(static_cast<uint32_t>(doc["preinicio_segundos"] | prestartSeconds), 0UL, 120UL);
+  relayTestSeconds = constrain(static_cast<uint32_t>(doc["prueba_rele_segundos"] | relayTestSeconds), 1UL, 10UL);
   ownerLinked = doc["ownerLinked"] | false;
   lastConfigRefreshAt = millis();
   if (redraw && uiState == UI_IDLE) showIdle();
@@ -408,7 +503,7 @@ void pollPayment() {
   if ((response["activate"] | false) && status == "approved") {
     const uint32_t seconds = response["segundos"] | serviceSeconds;
     paymentId = "";
-    startService(seconds);
+    startPreparation(seconds);
     return;
   }
 
@@ -494,7 +589,7 @@ void portalHome() {
   String html = "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>";
   html += "<style>body{font-family:Arial;background:#08111f;color:#fff;max-width:520px;margin:auto;padding:24px}"
           "select,input,button{box-sizing:border-box;width:100%;padding:14px;margin:8px 0;border-radius:10px;border:0}"
-          "button{background:#22c55e;font-weight:bold}</style><h1>EVETEC Aspiradora</h1>";
+          "button{background:#22c55e;font-weight:bold}</style><h1>EVETEC Inflador</h1>";
   html += "<p>Selecciona la red Wi-Fi de la estacion.</p><form method='post' action='/save'><select name='ssid'>";
   for (int i = 0; i < count; i++) {
     html += "<option value='" + htmlEscape(WiFi.SSID(i)) + "'>" + htmlEscape(WiFi.SSID(i)) +
@@ -520,35 +615,52 @@ void portalSave() {
   portalReconnectPending = true;
 }
 
+void showWifiSetupScreen() {
+  uiState = UI_WIFI_SETUP;
+  clearScreen();
+  header("CONFIGURAR WIFI", C_GOLD);
+  centerText("1. Conectate a:", 105, 2, C_WHITE);
+  centerText("EVETEC-INFLADOR-SETUP", 145, 2, C_CYAN);
+  centerText("Clave: 12345678", 185, 2, C_WHITE);
+  centerText("2. Abre 192.168.4.1", 235, 2, C_WHITE);
+  centerText("desde el navegador", 275, 2, C_MUTED);
+  button(105, 360, 270, 64, C_PANEL_2, "PROBAR RELE GPIO 40", C_WHITE, 1);
+  centerText("Funciona sin Internet", 440, 1, C_MUTED);
+}
+
 void startWifiPortal() {
   relayOff();
   portalActive = true;
   portalReconnectPending = false;
   uiState = UI_WIFI_SETUP;
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("EVETEC-ASPIRADORA-SETUP", "12345678");
+  WiFi.softAP("EVETEC-INFLADOR-SETUP", "12345678");
   portal.on("/", HTTP_GET, portalHome);
   portal.on("/save", HTTP_POST, portalSave);
   portal.begin();
-  clearScreen();
-  header("CONFIGURAR WIFI", C_GOLD);
-  centerText("1. Conectate a:", 115, 2, C_WHITE);
-  centerText("EVETEC-ASPIRADORA-SETUP", 155, 2, C_CYAN);
-  centerText("Clave: 12345678", 195, 2, C_WHITE);
-  centerText("2. Abre 192.168.4.1", 255, 2, C_WHITE);
-  centerText("desde el navegador", 295, 2, C_MUTED);
+  showWifiSetupScreen();
 }
 
 void handleTouch(int x, int y) {
   if (uiState == UI_IDLE) {
-    if (y >= 295 && y <= 390 && serviceActive && WiFi.status() == WL_CONNECTED) {
-      createPayment();
-    } else if (y >= 395 && !ownerLinked && WiFi.status() == WL_CONNECTED) {
-      fetchOwnerLink();
+    if (x >= 275 && y >= 395) {
+      startRelayTest();
+    } else if (y >= 290 && y <= 390 && WiFi.status() == WL_CONNECTED) {
+      if (!ownerLinked) {
+        fetchOwnerLink();
+      } else if (serviceActive) {
+        createPayment();
+      }
     }
   } else if (uiState == UI_ERROR && y >= 330) {
     fetchRemoteConfig(false);
     showIdle();
+  } else if (uiState == UI_PREPARING && y >= 405) {
+    startService(pendingServiceSeconds);
+  } else if ((uiState == UI_RUNNING && y >= 395) || uiState == UI_RELAY_TEST) {
+    relayOff();
+    if (portalActive) showWifiSetupScreen();
+    else showIdle();
   }
 }
 
@@ -585,6 +697,31 @@ void setup() {
 void loop() {
   if (portalActive) {
     portal.handleClient();
+
+    touch.read();
+    const bool touched = touch.isTouched;
+    if (touched && !touchWasDown) {
+      const int x = constrain(map(touch.points[0].x, 480, 0, 0, 479), 0, 479);
+      const int y = constrain(map(touch.points[0].y, 480, 0, 0, 479), 0, 479);
+      if (uiState == UI_WIFI_SETUP && y >= 340) startRelayTest();
+      else if (uiState == UI_RELAY_TEST) handleTouch(x, y);
+    }
+    touchWasDown = touched;
+
+    if (uiState == UI_RELAY_TEST) {
+      const uint32_t now = millis();
+      if (static_cast<int32_t>(now - relayTestEndsAt) >= 0) {
+        relayOff();
+        showWifiSetupScreen();
+      } else {
+        const uint32_t remaining = (relayTestEndsAt - now + 999) / 1000;
+        if (remaining != lastCountdownSecond) {
+          lastCountdownSecond = remaining;
+          drawCountdown(remaining);
+        }
+      }
+    }
+
     if (portalReconnectPending) {
       portalReconnectPending = false;
       portal.stop();
@@ -624,11 +761,40 @@ void loop() {
   } else if (uiState == UI_OWNER_LINK && now - lastPaymentPollAt >= 5000) {
     lastPaymentPollAt = now;
     pollOwnerStatus();
+  } else if (uiState == UI_PREPARING) {
+    if (static_cast<int32_t>(now - prestartEndsAt) >= 0) {
+      startService(pendingServiceSeconds);
+    } else {
+      const uint32_t remaining = (prestartEndsAt - now + 999) / 1000;
+      if (remaining != lastCountdownSecond) {
+        lastCountdownSecond = remaining;
+        drawPrestartCountdown(remaining);
+      }
+      if (now - lastAnimationAt >= 180) {
+        lastAnimationAt = now;
+        drawTire(240, 350, 46, animationPhase++, C_GREEN);
+      }
+    }
   } else if (uiState == UI_RUNNING) {
     if (static_cast<int32_t>(now - relayEndsAt) >= 0) {
       showThanks();
     } else {
       const uint32_t remaining = (relayEndsAt - now + 999) / 1000;
+      if (remaining != lastCountdownSecond) {
+        lastCountdownSecond = remaining;
+        drawCountdown(remaining);
+      }
+      if (now - lastAnimationAt >= 180) {
+        lastAnimationAt = now;
+        drawAirPulse(animationPhase++);
+      }
+    }
+  } else if (uiState == UI_RELAY_TEST) {
+    if (static_cast<int32_t>(now - relayTestEndsAt) >= 0) {
+      relayOff();
+      showIdle();
+    } else {
+      const uint32_t remaining = (relayTestEndsAt - now + 999) / 1000;
       if (remaining != lastCountdownSecond) {
         lastCountdownSecond = remaining;
         drawCountdown(remaining);
@@ -642,7 +808,13 @@ void loop() {
     fetchRemoteConfig(true);
   }
 
-  if (uiState != UI_RUNNING && WiFi.status() != WL_CONNECTED &&
+  if (uiState == UI_IDLE && now - lastAnimationAt >= 300) {
+    lastAnimationAt = now;
+    drawTire(105, 190, 62, animationPhase++);
+  }
+
+  if (uiState != UI_RUNNING && uiState != UI_PREPARING && uiState != UI_RELAY_TEST &&
+      WiFi.status() != WL_CONNECTED &&
       now - lastWifiRetryAt >= WIFI_RETRY_MS) {
     lastWifiRetryAt = now;
     WiFi.reconnect();

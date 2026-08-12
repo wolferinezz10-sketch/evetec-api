@@ -99,11 +99,13 @@ let configGlobal = {
 
   basic: {
     activo: true,
-    nombre: "Aspirado 4 minutos",
+    nombre: "Inflado de neumaticos",
     segundos: 240,
+    preinicioSegundos: 15,
+    pruebaReleSegundos: 3,
     monto: 10,
     montoBase: 10,
-    descripcion: "Prueba inicial QR"
+    descripcion: "Inflador de autos por 4 minutos"
   },
 
   gachapon: {
@@ -160,7 +162,8 @@ function nuevoDevice(tipo = "premium") {
 let devices = {
   ASPIRADORA_001: nuevoDevice("premium"),
   ASPIRADORA_002: nuevoDevice("premium"),
-  ASPIRADORA_BASIC_001: nuevoDevice("basic")
+  ASPIRADORA_BASIC_001: nuevoDevice("basic"),
+  INFLADOR_001: nuevoDevice("basic")
 };
 
 let pagosCreados = {};
@@ -213,7 +216,8 @@ function detectarTipoDevice(deviceId) {
     return "gachapon";
   }
 
-  if (id.includes("BASIC") || id.includes("SIMPLE") || id.includes("BASICO")) {
+  if (id.includes("BASIC") || id.includes("SIMPLE") || id.includes("BASICO") ||
+      id.includes("INFLADOR")) {
     return "basic";
   }
 
@@ -258,12 +262,20 @@ function asegurarEstructuraConfig() {
   if (!configGlobal.basic) {
     configGlobal.basic = {
       activo: true,
-      nombre: "Uso básico",
-      segundos: 30,
-      monto: 100,
-      montoBase: 100,
-      descripcion: "Sistema básico QR fijo"
+      nombre: "Inflado de neumaticos",
+      segundos: 240,
+      preinicioSegundos: 15,
+      pruebaReleSegundos: 3,
+      monto: 10,
+      montoBase: 10,
+      descripcion: "Inflador de autos por 4 minutos"
     };
+  }
+  if (!Number.isFinite(Number(configGlobal.basic.preinicioSegundos))) {
+    configGlobal.basic.preinicioSegundos = 15;
+  }
+  if (!Number.isFinite(Number(configGlobal.basic.pruebaReleSegundos))) {
+    configGlobal.basic.pruebaReleSegundos = 3;
   }
 
   if (!configGlobal.gachapon) {
@@ -371,6 +383,7 @@ function cargarDatos() {
 
     if (!devices.ASPIRADORA_001) devices.ASPIRADORA_001 = nuevoDevice("premium");
     if (!devices.ASPIRADORA_BASIC_001) devices.ASPIRADORA_BASIC_001 = nuevoDevice("basic");
+    if (!devices.INFLADOR_001) devices.INFLADOR_001 = nuevoDevice("basic");
     if (!devices.GACHAPON_001) devices.GACHAPON_001 = nuevoDevice("gachapon");
     if (!devices.GALAGA_001) devices.GALAGA_001 = nuevoDevice("arcade");
 
@@ -387,6 +400,8 @@ if (!devices.GACHAPON_001) devices.GACHAPON_001 = nuevoDevice("gachapon");
 asegurarDevice("GACHAPON_001");
 if (!devices.GALAGA_001) devices.GALAGA_001 = nuevoDevice("arcade");
 asegurarDevice("GALAGA_001");
+if (!devices.INFLADOR_001) devices.INFLADOR_001 = nuevoDevice("basic");
+asegurarDevice("INFLADOR_001");
 
 function asegurarDevice(deviceId) {
   const id = String(deviceId || "ASPIRADORA_001").trim().toUpperCase() || "ASPIRADORA_001";
@@ -746,6 +761,8 @@ app.get("/config/:deviceId", (req, res) => {
       precio: Number(configGlobal.basic.monto),
       monto: Number(configGlobal.basic.monto),
       segundos: Number(configGlobal.basic.segundos),
+      preinicio_segundos: Number(configGlobal.basic.preinicioSegundos || 15),
+      prueba_rele_segundos: Number(configGlobal.basic.pruebaReleSegundos || 3),
       nombre: configGlobal.basic.nombre,
       descripcion: configGlobal.basic.descripcion,
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
@@ -1904,7 +1921,8 @@ app.get("/admin", (req, res) => {
       </div>
 
       <div class="box">
-        <h2>Sistema básico QR fijo</h2>
+        <h2>Inflador QR</h2>
+        <p class="small">Configuración de INFLADOR_001. El precio y los tiempos se actualizan automáticamente en la pantalla.</p>
         <form method="POST" action="/admin/basic/update">
           Activo:
           <input type="checkbox" name="activo" ${configGlobal.basic.activo ? "checked" : ""}><br>
@@ -1914,6 +1932,10 @@ app.get("/admin", (req, res) => {
           <input name="monto" value="${configGlobal.basic.monto}" size="8">
           Segundos:
           <input name="segundos" value="${configGlobal.basic.segundos}" size="8"><br>
+          Espera antes de encender:
+          <input name="preinicioSegundos" value="${configGlobal.basic.preinicioSegundos}" size="8"> segundos
+          Prueba de relé:
+          <input name="pruebaReleSegundos" value="${configGlobal.basic.pruebaReleSegundos}" size="8"> segundos<br>
           Descripción:
           <input name="descripcion" value="${escaparHtml(configGlobal.basic.descripcion)}" size="42"><br>
           <button class="save" type="submit">Guardar básico</button>
@@ -2216,7 +2238,9 @@ app.post("/admin/basic/update", (req, res) => {
   configGlobal.basic.activo = req.body.activo === "on";
   configGlobal.basic.nombre = req.body.nombre || configGlobal.basic.nombre;
   configGlobal.basic.monto = Number(req.body.monto) || configGlobal.basic.monto;
-  configGlobal.basic.segundos = Number(req.body.segundos) || configGlobal.basic.segundos;
+  configGlobal.basic.segundos = Math.max(1, Math.min(3600, Number(req.body.segundos) || configGlobal.basic.segundos));
+  configGlobal.basic.preinicioSegundos = Math.max(0, Math.min(120, Number(req.body.preinicioSegundos) || 0));
+  configGlobal.basic.pruebaReleSegundos = Math.max(1, Math.min(10, Number(req.body.pruebaReleSegundos) || 3));
   configGlobal.basic.descripcion = req.body.descripcion || configGlobal.basic.descripcion;
   configGlobal.basic.montoBase = configGlobal.basic.montoBase || configGlobal.basic.monto;
   guardarDatos();

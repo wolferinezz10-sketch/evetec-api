@@ -1,19 +1,27 @@
-# EVETEC Aspiradora QR - ESP32-4848S040
+# EVETEC Inflador QR - ESP32-4848S040
 
-Firmware de prototipo para una aspiradora de autos operada por pago de Mercado Pago.
+Firmware para un inflador de neumáticos operado por pago de Mercado Pago.
 
 ## Flujo
 
 1. La pantalla se conecta a Wi-Fi. En el primer arranque crea la red
-   `EVETEC-ASPIRADORA-SETUP` (clave `12345678`) y permite guardar la red desde
+   `EVETEC-INFLADOR-SETUP` (clave `12345678`) y permite guardar la red desde
    `http://192.168.4.1`.
-2. El usuario toca **INICIAR**.
-3. El backend crea una preferencia de Checkout Pro y la pantalla genera el QR.
-4. El ESP32 reclama el pago al backend. El backend consulta Mercado Pago y valida
+2. Si el equipo todavía no tiene propietario, la pantalla muestra **VINCULAR CUENTA**.
+   El futuro cliente escanea el QR y autoriza su cuenta de Mercado Pago.
+3. El usuario toca **INFLAR NEUMATICOS**.
+4. El backend crea una preferencia de Checkout Pro y la pantalla genera el QR.
+5. El ESP32 reclama el pago al backend. El backend consulta Mercado Pago y valida
    estado, referencia externa, monto y moneda.
-5. El backend entrega una autorización de consumo único.
-6. GPIO40 (`relay1` en H1) queda activo durante el tiempo vendido. Al terminar,
+6. El backend entrega una autorización de consumo único. La pantalla confirma
+   **LISTO PARA USAR** y espera 15 segundos para preparar la manguera.
+7. GPIO40 (`relay1` en H1) queda activo durante el tiempo vendido. Al terminar,
    el relé se apaga y aparece la pantalla de agradecimiento.
+
+La pantalla principal incluye **PROBAR RELE**, que activa GPIO40 durante 3 segundos
+sin crear un pago. El pulso se puede apagar inmediatamente tocando la pantalla.
+El mismo botón aparece en la pantalla de configuración Wi-Fi, por lo que la salida
+se puede comprobar antes de conectar el equipo a Internet.
 
 El estado seguro del relé es apagado: se fuerza antes de inicializar display,
 Wi-Fi o red. Un reinicio durante el servicio apaga la salida.
@@ -49,11 +57,16 @@ esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDC
 Antes de proteger la API con `DEVICE_API_KEY`, cargar el mismo valor tanto en el
 entorno del backend como en la constante del firmware.
 
-## Configuracion inicial de prueba
+## Configuración remota
 
-El backend queda con el plan básico en ARS 10 por 240 segundos. Si Mercado Pago
-rechaza ese importe por el mínimo vigente de la cuenta, cambiarlo a ARS 20 desde
-el panel administrativo.
+El equipo conserva el ID productivo `ASPIRADORA_BASIC_001`. El precio, la duración del relé, la espera
+previa y la duración de prueba se modifican en:
+
+`https://evetec-api.onrender.com/admin`
+
+La configuración inicial es ARS 10, 240 segundos de servicio, 15 segundos de
+preparación y 3 segundos de prueba. La pantalla consulta los cambios cada 30
+segundos cuando está libre.
 
 ## Seguridad pendiente para produccion
 
@@ -62,4 +75,4 @@ el panel administrativo.
 - Guardar tokens OAuth cifrados en una base de datos persistente.
 - Implementar rotación automática de refresh tokens OAuth.
 - Añadir contactor, protección térmica, fusible y paro físico adecuados a la
-  potencia real de la aspiradora.
+  potencia real del inflador.
