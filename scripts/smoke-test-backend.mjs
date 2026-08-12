@@ -63,7 +63,8 @@ try {
     health_ok: health.ok === true,
     tokens_exposed: /ownerAccessToken|ownerRefreshToken/.test(healthJson),
     admin_protected: health.adminProtected === true,
-    device_api_protected: health.deviceApiProtected === true
+    device_api_protected: health.deviceApiProtected === true,
+    prototype_only: Object.keys(health.devices || {}).length === 1 && Boolean(health.devices?.ASPIRADORA_BASIC_001)
   }));
 
   const config = await fetch(
@@ -81,6 +82,43 @@ try {
   });
   console.log(JSON.stringify({
     admin_without_credentials_status: adminResponse.status
+  }));
+
+  const adminHtml = await fetch(`http://127.0.0.1:${port}/admin`, {
+    headers: {
+      authorization: `Basic ${Buffer.from("admin:local-admin-test").toString("base64")}`
+    }
+  }).then(response => response.text());
+  console.log(JSON.stringify({
+    admin_prototype_visible: adminHtml.includes("ASPIRADORA_BASIC_001"),
+    admin_has_owner_controls: adminHtml.includes("Cambiar cuenta dueña") || adminHtml.includes("Vincular cuenta dueña"),
+    admin_has_service_controls: adminHtml.includes("Duración del servicio") && adminHtml.includes("Tipo de cobro"),
+    admin_has_other_products: /Gachapon|Galaga|Premium: 3 precios/.test(adminHtml)
+  }));
+
+  const updateResponse = await fetch(`http://127.0.0.1:${port}/admin/prototype/update`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      authorization: `Basic ${Buffer.from("admin:local-admin-test").toString("base64")}`,
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      activo: "on",
+      nombre: "Aspiradora QR",
+      monto: "12",
+      segundos: "245",
+      preinicioSegundos: "10",
+      pruebaReleSegundos: "2",
+      modoCobro: "owner_direct",
+      comision: "0",
+      descripcion: "Prueba local"
+    })
+  });
+  const updatedConfig = await fetch(`http://127.0.0.1:${port}/config/ASPIRADORA_BASIC_001`).then(response => response.json());
+  console.log(JSON.stringify({
+    admin_update_redirect: updateResponse.status === 302,
+    admin_update_applied: updatedConfig.monto === 12 && updatedConfig.segundos === 245 && updatedConfig.preinicio_segundos === 10
   }));
 
   const preference = await fetch(`http://127.0.0.1:${port}/basic/crear-pago`, {

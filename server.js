@@ -19,6 +19,7 @@ const EVETEC_MP_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || process.env.MP_
 const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const DEVICE_API_KEY = process.env.DEVICE_API_KEY || "";
+const PROTOTYPE_DEVICE_ID = "ASPIRADORA_BASIC_001";
 
 const DATA_FILE = process.env.DATA_FILE || "evetec-timers-data.json";
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
@@ -160,10 +161,7 @@ function nuevoDevice(tipo = "premium") {
 }
 
 let devices = {
-  ASPIRADORA_001: nuevoDevice("premium"),
-  ASPIRADORA_002: nuevoDevice("premium"),
-  ASPIRADORA_BASIC_001: nuevoDevice("basic"),
-  INFLADOR_001: nuevoDevice("basic")
+  [PROTOTYPE_DEVICE_ID]: nuevoDevice("basic")
 };
 
 let pagosCreados = {};
@@ -225,13 +223,10 @@ function detectarTipoDevice(deviceId) {
 }
 
 function limpiarDevicesMigrados(obj) {
-  const limpio = {};
-
-  for (const id of Object.keys(obj || {})) {
-    limpio[id] = obj[id];
-  }
-
-  return limpio;
+  const actual = obj && obj[PROTOTYPE_DEVICE_ID];
+  return {
+    [PROTOTYPE_DEVICE_ID]: actual || nuevoDevice("basic")
+  };
 }
 
 function asegurarEstructuraConfig() {
@@ -381,11 +376,9 @@ function cargarDatos() {
       pagosCreados = data.pagosCreados;
     }
 
-    if (!devices.ASPIRADORA_001) devices.ASPIRADORA_001 = nuevoDevice("premium");
-    if (!devices.ASPIRADORA_BASIC_001) devices.ASPIRADORA_BASIC_001 = nuevoDevice("basic");
-    if (!devices.INFLADOR_001) devices.INFLADOR_001 = nuevoDevice("basic");
-    if (!devices.GACHAPON_001) devices.GACHAPON_001 = nuevoDevice("gachapon");
-    if (!devices.GALAGA_001) devices.GALAGA_001 = nuevoDevice("arcade");
+    if (!devices[PROTOTYPE_DEVICE_ID]) {
+      devices[PROTOTYPE_DEVICE_ID] = nuevoDevice("basic");
+    }
 
     console.log("Datos EVETEC cargados");
   } catch (err) {
@@ -396,12 +389,7 @@ function cargarDatos() {
 asegurarEstructuraConfig();
 cargarDatos();
 asegurarEstructuraConfig();
-if (!devices.GACHAPON_001) devices.GACHAPON_001 = nuevoDevice("gachapon");
-asegurarDevice("GACHAPON_001");
-if (!devices.GALAGA_001) devices.GALAGA_001 = nuevoDevice("arcade");
-asegurarDevice("GALAGA_001");
-if (!devices.INFLADOR_001) devices.INFLADOR_001 = nuevoDevice("basic");
-asegurarDevice("INFLADOR_001");
+asegurarDevice(PROTOTYPE_DEVICE_ID);
 
 function asegurarDevice(deviceId) {
   const id = String(deviceId || "ASPIRADORA_001").trim().toUpperCase() || "ASPIRADORA_001";
@@ -1827,6 +1815,115 @@ app.get("/", (req, res) => {
 });
 
 app.get("/admin", (req, res) => {
+  const id = PROTOTYPE_DEVICE_ID;
+  const d = asegurarDevice(id);
+  const cfg = configGlobal.basic;
+  const stats = d.stats || statsIniciales();
+  const ultimoPago = stats.ultimosPagos?.[0] || null;
+  const ultimaConexion = d.ultimaConexion
+    ? new Date(d.ultimaConexion).toLocaleString("es-AR")
+    : "Nunca";
+  const pagos = Object.values(pagosCreados)
+    .filter((p, index, arr) => p.device_id === id && arr.findIndex(x => x.external_reference === p.external_reference) === index)
+    .slice(-15)
+    .reverse();
+
+  let pagosHtml = pagos.map(p => `
+    <tr>
+      <td>${escaparHtml(new Date(p.fecha || p.created_at || Date.now()).toLocaleString("es-AR"))}</td>
+      <td>${escaparHtml(p.external_reference || "-")}</td>
+      <td>$${formatoDinero(p.monto)}</td>
+      <td>${formatoTiempo(p.segundos)}</td>
+      <td><span class="pill ${p.estado === "approved" ? "success" : "muted"}">${escaparHtml(p.estado || "pendiente")}</span></td>
+    </tr>
+  `).join("");
+
+  if (!pagosHtml) pagosHtml = `<tr><td colspan="5" class="empty">Todavía no hay pagos registrados para este equipo.</td></tr>`;
+
+  res.send(`<!doctype html>
+  <html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>EVETEC | Aspiradora QR</title>
+    <style>
+      :root{color-scheme:dark;--bg:#07111f;--panel:#101d2d;--panel2:#142438;--line:#263a50;--text:#f4f8fb;--muted:#91a4b7;--cyan:#27d3e2;--green:#38d987;--red:#ff6474;--yellow:#ffc857}
+      *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#12324a 0,transparent 34%),var(--bg);color:var(--text);font:15px Inter,Segoe UI,Arial,sans-serif}
+      main{width:min(1120px,calc(100% - 32px));margin:auto;padding:34px 0 60px}.top{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:24px}
+      .brand{font-size:13px;letter-spacing:.22em;color:var(--cyan);font-weight:800}.top h1{margin:7px 0 5px;font-size:clamp(27px,4vw,42px)}.sub,.hint{color:var(--muted)}
+      .status{display:flex;align-items:center;gap:9px;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:10px 15px;font-weight:700}.dot{width:9px;height:9px;border-radius:50%;background:${d.online ? "var(--green)" : "var(--red)"};box-shadow:0 0 12px currentColor}
+      .stats,.columns{display:grid;gap:16px}.stats{grid-template-columns:repeat(4,1fr);margin-bottom:16px}.columns{grid-template-columns:1.25fr .75fr}.card{background:linear-gradient(145deg,var(--panel),#0c1826);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 16px 45px #0004}.stat b{display:block;font-size:25px;margin-top:8px}.label{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700}
+      h2{margin:0 0 18px;font-size:20px}h3{margin:25px 0 12px;color:var(--cyan);font-size:14px;text-transform:uppercase;letter-spacing:.08em}.form-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:15px}.field{display:flex;flex-direction:column;gap:7px}.wide{grid-column:1/-1}label{font-weight:650}input,select{width:100%;background:#091522;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:11px 12px;font:inherit;outline:none}input:focus,select:focus{border-color:var(--cyan)}
+      .switches{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px}.check{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}.check input{width:auto;margin:0}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:20px}.btn{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:10px;padding:11px 15px;text-decoration:none;font-weight:800;cursor:pointer}.primary{background:var(--cyan);color:#03141a}.secondary{background:#20344a;color:var(--text);border:1px solid #34506d}.danger{background:#421d29;color:#ffb3bc;border:1px solid #7b3041}
+      .owner{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}.owner-line{display:flex;justify-content:space-between;gap:12px;margin:8px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800}.success{background:#123d2d;color:#70f0ad}.muted{background:#293746;color:#b9c7d5}.warning{background:#493b18;color:#ffe08a}
+      table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.empty{text-align:center;color:var(--muted);padding:25px}.footer{margin-top:14px;color:var(--muted);font-size:12px}
+      @media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}}
+    </style>
+  </head>
+  <body><main>
+    <header class="top">
+      <div><div class="brand">EVETEC AUTOMOTIVE</div><h1>Aspiradora QR</h1><div class="sub">Administración exclusiva del prototipo <b>${id}</b></div></div>
+      <div class="status"><span class="dot"></span>${d.online ? "Equipo online" : "Equipo offline"}</div>
+    </header>
+
+    <section class="stats">
+      <div class="card stat"><span class="label">Recaudado</span><b>$${formatoDinero(stats.totalRecaudado)}</b></div>
+      <div class="card stat"><span class="label">Pagos aprobados</span><b>${stats.pagosAprobados || 0}</b></div>
+      <div class="card stat"><span class="label">Tiempo vendido</span><b>${formatoTiempo(stats.segundosVendidos)}</b></div>
+      <div class="card stat"><span class="label">Último pago</span><b>${ultimoPago ? `$${formatoDinero(ultimoPago.monto)}` : "—"}</b></div>
+    </section>
+
+    <section class="columns">
+      <div class="card">
+        <h2>Configuración del servicio</h2>
+        <form method="POST" action="/admin/prototype/update">
+          <div class="switches">
+            <label class="check"><input type="checkbox" name="activo" ${d.activo && cfg.activo ? "checked" : ""}> Equipo habilitado</label>
+            <label class="check"><input type="checkbox" name="mantenimiento" ${d.modoMantenimiento ? "checked" : ""}> Modo mantenimiento</label>
+          </div>
+          <div class="form-grid">
+            <div class="field wide"><label>Nombre visible</label><input name="nombre" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></div>
+            <div class="field"><label>Precio (ARS)</label><input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></div>
+            <div class="field"><label>Duración del servicio (segundos)</label><input name="segundos" type="number" min="1" max="3600" value="${Number(cfg.segundos)}" required></div>
+            <div class="field"><label>Espera antes de encender (segundos)</label><input name="preinicioSegundos" type="number" min="0" max="120" value="${Number(cfg.preinicioSegundos)}" required></div>
+            <div class="field"><label>Prueba de relé (segundos)</label><input name="pruebaReleSegundos" type="number" min="1" max="10" value="${Number(cfg.pruebaReleSegundos)}" required></div>
+            <div class="field"><label>Tipo de cobro</label><select name="modoCobro">
+              <option value="owner_commission" ${d.modoCobro === "owner_commission" ? "selected" : ""}>Cuenta del dueño + comisión EVETEC</option>
+              <option value="owner_direct" ${d.modoCobro === "owner_direct" ? "selected" : ""}>100% directo al dueño</option>
+              <option value="evetec" ${d.modoCobro === "evetec" ? "selected" : ""}>100% a cuenta EVETEC</option>
+            </select></div>
+            <div class="field"><label>Comisión EVETEC (%)</label><input name="comision" type="number" min="0" max="100" step="0.01" value="${Number(d.comisionEvetecPorcentaje)}" required></div>
+            <div class="field wide"><label>Descripción</label><input name="descripcion" value="${escaparHtml(cfg.descripcion)}" maxlength="120"></div>
+          </div>
+          <div class="actions"><button class="btn primary" type="submit">Guardar cambios</button></div>
+        </form>
+      </div>
+
+      <aside class="card">
+        <h2>Dueño y Mercado Pago</h2>
+        <div class="owner">
+          <div class="owner-line"><span>Estado</span><span class="pill ${d.ownerLinked ? "success" : "warning"}">${d.ownerLinked ? "Vinculada" : "Sin vincular"}</span></div>
+          <div class="owner-line"><span>Usuario MP</span><b>${escaparHtml(d.ownerUserId || "No asignado")}</b></div>
+          <div class="owner-line"><span>Correo</span><b>${escaparHtml(d.ownerEmail || "No informado")}</b></div>
+        </div>
+        <p class="hint">Para asignar o cambiar el dueño, autorizá la cuenta correcta directamente en Mercado Pago.</p>
+        <div class="actions">
+          <a class="btn primary" href="/oauth/link/${encodeURIComponent(id)}">${d.ownerLinked ? "Cambiar cuenta dueña" : "Vincular cuenta dueña"}</a>
+          ${d.ownerLinked ? `<form method="POST" action="/unlink-owner/${encodeURIComponent(id)}"><button class="btn danger" type="submit">Desvincular</button></form>` : ""}
+        </div>
+        <h3>Estado del equipo</h3>
+        <div class="owner-line"><span>Última conexión</span><b>${escaparHtml(ultimaConexion)}</b></div>
+        <div class="owner-line"><span>Salida</span><b>GPIO 40</b></div>
+        <div class="owner-line"><span>Moneda</span><b>${escaparHtml(configGlobal.moneda || "ARS")}</b></div>
+      </aside>
+    </section>
+
+    <section class="card" style="margin-top:16px"><h2>Últimos pagos de esta aspiradora</h2><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Referencia</th><th>Monto</th><th>Tiempo</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
+    <div class="footer">Los cambios de precio y tiempos son consultados automáticamente por la pantalla. Base: ${escaparHtml(PUBLIC_BASE_URL)}</div>
+  </main></body></html>`);
+});
+
+function renderLegacyAdminDisabled(req, res) {
   let html = `
   <!doctype html>
   <html>
@@ -2220,11 +2317,43 @@ app.get("/admin", (req, res) => {
   `;
 
   res.send(html);
-});
+}
 
 // =====================================================
 // ACCIONES ADMIN
 // =====================================================
+
+app.post("/admin/prototype/update", (req, res) => {
+  const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
+  const cfg = configGlobal.basic;
+  const activo = req.body.activo === "on";
+  const modo = String(req.body.modoCobro || "owner_commission");
+  const monto = Number(req.body.monto);
+  const segundos = Number(req.body.segundos);
+  const preinicio = Number(req.body.preinicioSegundos);
+  const prueba = Number(req.body.pruebaReleSegundos);
+  const comision = Number(req.body.comision);
+
+  configGlobal.activo = activo;
+  cfg.activo = activo;
+  d.activo = activo;
+  d.modoMantenimiento = req.body.mantenimiento === "on";
+  cfg.nombre = String(req.body.nombre || cfg.nombre).trim().slice(0, 60);
+  cfg.descripcion = String(req.body.descripcion || cfg.descripcion).trim().slice(0, 120);
+
+  if (Number.isFinite(monto) && monto > 0) cfg.monto = Math.round(monto * 100) / 100;
+  if (Number.isFinite(segundos)) cfg.segundos = Math.max(1, Math.min(3600, Math.round(segundos)));
+  if (Number.isFinite(preinicio)) cfg.preinicioSegundos = Math.max(0, Math.min(120, Math.round(preinicio)));
+  if (Number.isFinite(prueba)) cfg.pruebaReleSegundos = Math.max(1, Math.min(10, Math.round(prueba)));
+  if (Number.isFinite(comision)) d.comisionEvetecPorcentaje = Math.max(0, Math.min(100, comision));
+
+  d.modoCobro = ["owner_commission", "owner_direct", "evetec"].includes(modo)
+    ? modo
+    : "owner_commission";
+
+  guardarDatos();
+  res.redirect("/admin");
+});
 
 app.post("/admin/global/update", (req, res) => {
   configGlobal.activo = req.body.activo === "on";
