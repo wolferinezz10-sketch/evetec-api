@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <ArduinoJson.h>
+#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSansBold18pt7b.h>
+#include <Fonts/FreeSansBold24pt7b.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <Touch_GT911.h>
@@ -122,20 +126,40 @@ void relayOn() {
   digitalWrite(PIN_RELAY, RELAY_ACTIVE_LEVEL);
 }
 
-void textAt(const String &text, int x, int y, uint8_t size, uint16_t color) {
+const GFXfont *uiFont(uint8_t size) {
+  if (size <= 1) return &FreeSans9pt7b;
+  if (size == 2) return &FreeSans12pt7b;
+  if (size == 3) return &FreeSansBold18pt7b;
+  return &FreeSansBold24pt7b;
+}
+
+uint8_t uiFontScale(uint8_t size) {
+  return size >= 6 ? 2 : 1;
+}
+
+void configureText(uint8_t size, uint16_t color) {
   display->setTextWrap(false);
-  display->setTextSize(size);
+  display->setFont(uiFont(size));
+  display->setTextSize(uiFontScale(size));
   display->setTextColor(color);
-  display->setCursor(x, y);
+}
+
+void textAt(const String &text, int x, int y, uint8_t size, uint16_t color) {
+  configureText(size, color);
+  int16_t x1, y1;
+  uint16_t w, h;
+  display->getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+  display->setCursor(x - x1, y - y1);
   display->print(text);
 }
 
 void centerText(const String &text, int y, uint8_t size, uint16_t color) {
   int16_t x1, y1;
   uint16_t w, h;
-  display->setTextSize(size);
-  display->getTextBounds(text, 0, y, &x1, &y1, &w, &h);
-  textAt(text, max(0, (480 - static_cast<int>(w)) / 2), y, size, color);
+  configureText(size, color);
+  display->getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+  display->setCursor(max(0, (480 - static_cast<int>(w)) / 2) - x1, y - y1);
+  display->print(text);
 }
 
 void button(int x, int y, int w, int h, uint16_t color, const String &label,
@@ -146,10 +170,11 @@ void button(int x, int y, int w, int h, uint16_t color, const String &label,
   display->drawFastHLine(x + 18, y + 3, w - 36, C_WHITE);
   int16_t x1, y1;
   uint16_t tw, th;
-  display->setTextSize(textSize);
+  configureText(textSize, textColor);
   display->getTextBounds(label, 0, 0, &x1, &y1, &tw, &th);
-  textAt(label, x + (w - static_cast<int>(tw)) / 2,
-         y + (h - static_cast<int>(th)) / 2 - y1, textSize, textColor);
+  display->setCursor(x + (w - static_cast<int>(tw)) / 2 - x1,
+                     y + (h - static_cast<int>(th)) / 2 - y1);
+  display->print(label);
 }
 
 void header(const String &status, uint16_t color = C_CYAN) {

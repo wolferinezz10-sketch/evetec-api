@@ -88,6 +88,11 @@ imágenes externas ni archivos pesados: todos los elementos se dibujan en el
 ESP32 para mantener tiempos de respuesta previsibles y facilitar el reemplazo
 de una pantalla en campo.
 
+Los textos usan la familia proporcional FreeSans y FreeSans Bold en cuatro
+jerarquías visuales. Esto evita la apariencia pixelada de la fuente clásica de
+Arduino y mantiene títulos, botones, valores y mensajes alineados mediante sus
+métricas reales.
+
 ## Configuración remota
 
 El equipo conserva el ID productivo `ASPIRADORA_BASIC_001`. El precio, la duración del relé, la espera
