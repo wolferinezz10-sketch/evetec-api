@@ -28,15 +28,20 @@ constexpr uint32_t PAYMENT_TIMEOUT_MS = 10UL * 60UL * 1000UL;
 constexpr uint32_t CONFIG_REFRESH_MS = 30000;
 constexpr uint32_t WIFI_RETRY_MS = 15000;
 
-constexpr uint16_t C_BG = 0x0841;
-constexpr uint16_t C_PANEL = 0x10A3;
-constexpr uint16_t C_PANEL_2 = 0x18E5;
+// Paleta EVETEC Automotive: azul noche, superficies grafito y acentos electricos.
+constexpr uint16_t C_BG = 0x020B;
+constexpr uint16_t C_BG_2 = 0x0412;
+constexpr uint16_t C_PANEL = 0x0C36;
+constexpr uint16_t C_PANEL_2 = 0x147A;
+constexpr uint16_t C_BORDER = 0x251E;
+constexpr uint16_t C_SHADOW = 0x0105;
 constexpr uint16_t C_WHITE = 0xFFFF;
-constexpr uint16_t C_MUTED = 0x9CF3;
-constexpr uint16_t C_CYAN = 0x06FF;
-constexpr uint16_t C_GREEN = 0x4EEA;
-constexpr uint16_t C_RED = 0xF9E8;
-constexpr uint16_t C_GOLD = 0xFDC0;
+constexpr uint16_t C_MUTED = 0x94B8;
+constexpr uint16_t C_CYAN = 0x2E7F;
+constexpr uint16_t C_BLUE = 0x1CFF;
+constexpr uint16_t C_GREEN = 0x2F6D;
+constexpr uint16_t C_RED = 0xF2AB;
+constexpr uint16_t C_GOLD = 0xFE68;
 constexpr uint16_t C_BLACK = 0x0000;
 
 const char GLOBALSIGN_R4_ROOT_CA[] PROGMEM = R"EOF(
@@ -135,20 +140,44 @@ void centerText(const String &text, int y, uint8_t size, uint16_t color) {
 
 void button(int x, int y, int w, int h, uint16_t color, const String &label,
             uint16_t textColor = C_BG, uint8_t textSize = 3) {
-  display->fillRoundRect(x, y, w, h, 18, color);
+  display->fillRoundRect(x + 3, y + 5, w, h, 16, C_SHADOW);
+  display->fillRoundRect(x, y, w, h, 16, color);
+  display->drawRoundRect(x, y, w, h, 16, C_BORDER);
+  display->drawFastHLine(x + 18, y + 3, w - 36, C_WHITE);
   int16_t x1, y1;
   uint16_t tw, th;
   display->setTextSize(textSize);
   display->getTextBounds(label, 0, 0, &x1, &y1, &tw, &th);
   textAt(label, x + (w - static_cast<int>(tw)) / 2,
-         y + (h - static_cast<int>(th)) / 2, textSize, textColor);
+         y + (h - static_cast<int>(th)) / 2 - y1, textSize, textColor);
 }
 
 void header(const String &status, uint16_t color = C_CYAN) {
-  textAt("EVETEC", 24, 20, 2, C_WHITE);
-  display->fillCircle(452, 27, 6, WiFi.status() == WL_CONNECTED ? C_GREEN : C_RED);
-  textAt(status, 24, 50, 1, color);
-  display->drawFastHLine(24, 72, 432, C_PANEL_2);
+  display->fillCircle(31, 28, 16, C_BLUE);
+  display->drawCircle(31, 28, 16, C_CYAN);
+  textAt("E", 25, 20, 2, C_WHITE);
+  textAt("EVETEC", 56, 14, 2, C_WHITE);
+  textAt("AUTOMOTIVE", 57, 38, 1, C_MUTED);
+
+  const uint16_t wifiColor = WiFi.status() == WL_CONNECTED ? C_GREEN : C_RED;
+  display->drawCircle(451, 27, 11, C_BORDER);
+  display->fillCircle(451, 27, 5, wifiColor);
+  display->fillRoundRect(22, 54, 436, 25, 11, C_PANEL);
+  display->fillCircle(37, 66, 4, color);
+  textAt(status, 49, 60, 1, color);
+}
+
+void card(int x, int y, int w, int h, uint16_t accent = C_BORDER) {
+  display->fillRoundRect(x + 4, y + 6, w, h, 18, C_SHADOW);
+  display->fillRoundRect(x, y, w, h, 18, C_PANEL);
+  display->drawRoundRect(x, y, w, h, 18, C_BORDER);
+  display->fillRoundRect(x + 16, y, w - 32, 3, 1, accent);
+}
+
+void badge(int x, int y, int w, const String &label, uint16_t color) {
+  display->fillRoundRect(x, y, w, 28, 12, C_PANEL_2);
+  display->fillCircle(x + 14, y + 14, 4, color);
+  textAt(label, x + 25, y + 10, 1, C_WHITE);
 }
 
 String moneyText(float amount) {
@@ -165,15 +194,23 @@ String durationText(uint32_t seconds) {
 
 void clearScreen() {
   display->fillScreen(C_BG);
+  display->fillRect(0, 115, 480, 365, C_BG_2);
+  for (int y = 115; y < 480; y += 52) display->drawFastHLine(0, y, 480, C_PANEL);
+  for (int x = 24; x < 480; x += 54) {
+    for (int y = 108; y < 480; y += 54) display->fillCircle(x, y, 1, C_BORDER);
+  }
+  display->drawCircle(455, 126, 92, C_PANEL);
+  display->drawCircle(455, 126, 118, C_PANEL);
 }
 
 void drawTire(int cx, int cy, int radius, uint8_t phase, uint16_t accent = C_CYAN) {
-  display->fillCircle(cx, cy, radius + 5, C_BG);
+  display->fillCircle(cx, cy, radius + 7, C_PANEL);
   display->fillCircle(cx, cy, radius, C_BLACK);
-  display->drawCircle(cx, cy, radius, C_MUTED);
-  display->drawCircle(cx, cy, radius - 5, C_PANEL_2);
+  display->drawCircle(cx, cy, radius, accent);
+  display->drawCircle(cx, cy, radius - 5, C_BORDER);
   display->fillCircle(cx, cy, radius - 20, C_PANEL);
-  display->drawCircle(cx, cy, radius - 20, accent);
+  display->drawCircle(cx, cy, radius - 20, C_MUTED);
+  display->drawCircle(cx, cy, radius - 22, accent);
   display->fillCircle(cx, cy, 10, accent);
 
   for (int i = 0; i < 6; i++) {
@@ -191,11 +228,15 @@ void drawTire(int cx, int cy, int radius, uint8_t phase, uint16_t accent = C_CYA
     const int ty = cy + sinf(angle) * (radius - 2);
     display->fillCircle(tx, ty, 2, C_MUTED);
   }
+
+  display->fillRect(cx + radius - 4, cy + 16, 12, 5, C_MUTED);
+  display->drawLine(cx + radius + 7, cy + 18, cx + radius + 22, cy + 26, accent);
 }
 
 void drawAirPulse(uint8_t phase) {
-  display->fillRect(25, 330, 430, 48, C_BG);
-  display->drawLine(55, 356, 405, 356, C_PANEL_2);
+  display->fillRect(25, 330, 430, 48, C_BG_2);
+  display->drawLine(55, 356, 405, 356, C_BORDER);
+  display->drawLine(55, 357, 405, 357, C_PANEL_2);
   for (int i = 0; i < 5; i++) {
     const int x = 70 + ((phase * 22 + i * 78) % 330);
     const int y = 348 - (i % 2) * 10;
@@ -207,9 +248,14 @@ void drawAirPulse(uint8_t phase) {
 void showBoot(const String &message) {
   uiState = UI_BOOT;
   clearScreen();
-  centerText("EVETEC", 110, 5, C_CYAN);
-  centerText("INFLADOR QR", 180, 3, C_WHITE);
-  centerText(message, 280, 2, C_MUTED);
+  display->fillCircle(240, 148, 54, C_BLUE);
+  display->drawCircle(240, 148, 58, C_CYAN);
+  centerText("E", 119, 5, C_WHITE);
+  centerText("EVETEC", 225, 4, C_WHITE);
+  centerText("AUTOMOTIVE AIR STATION", 275, 2, C_CYAN);
+  card(70, 330, 340, 70, C_BLUE);
+  centerText(message, 352, 2, C_WHITE);
+  for (int i = 0; i < 3; i++) display->fillCircle(222 + i * 18, 425, 4, i == animationPhase % 3 ? C_GREEN : C_BORDER);
 }
 
 void showError(const String &title, const String &message) {
@@ -217,11 +263,14 @@ void showError(const String &title, const String &message) {
   uiState = UI_ERROR;
   lastError = message;
   clearScreen();
-  header("ERROR", C_RED);
-  centerText(title, 125, 4, C_RED);
-  centerText(message.substring(0, 34), 205, 2, C_WHITE);
-  centerText(message.substring(34, 68), 240, 2, C_WHITE);
-  button(70, 345, 340, 70, C_CYAN, "VOLVER", C_BG, 3);
+  header("ATENCION REQUERIDA", C_RED);
+  card(30, 105, 420, 220, C_RED);
+  display->fillCircle(240, 150, 26, C_RED);
+  centerText("!", 134, 3, C_WHITE);
+  centerText(title, 195, 3, C_RED);
+  centerText(message.substring(0, 34), 245, 2, C_WHITE);
+  centerText(message.substring(34, 68), 278, 2, C_MUTED);
+  button(70, 360, 340, 68, C_BLUE, "VOLVER", C_WHITE, 3);
 }
 
 void showIdle() {
@@ -232,25 +281,30 @@ void showIdle() {
   clearScreen();
   header(serviceActive ? "LISTO PARA USAR" : "FUERA DE SERVICIO",
          serviceActive ? C_GREEN : C_RED);
-  centerText("INFLADOR DE NEUMATICOS", 88, 2, C_WHITE);
-  drawTire(105, 190, 62, animationPhase);
-  textAt("TIEMPO", 215, 135, 1, C_MUTED);
-  textAt(durationText(serviceSeconds), 215, 158, 2, C_CYAN);
-  textAt("PRECIO", 215, 205, 1, C_MUTED);
-  textAt(moneyText(servicePrice), 215, 225, 5, C_GOLD);
+  centerText("AIRE PARA TU VIAJE", 91, 2, C_WHITE);
+  card(22, 120, 436, 158, C_BLUE);
+  drawTire(105, 199, 55, animationPhase, C_BLUE);
+  display->drawFastVLine(185, 143, 112, C_BORDER);
+  textAt("SERVICIO", 215, 143, 1, C_MUTED);
+  textAt("INFLADO DE NEUMATICOS", 215, 163, 1, C_WHITE);
+  textAt("DURACION", 215, 194, 1, C_MUTED);
+  textAt(durationText(serviceSeconds), 215, 214, 2, C_CYAN);
+  textAt("VALOR", 215, 244, 1, C_MUTED);
+  textAt(moneyText(servicePrice), 322, 226, 4, C_GOLD);
 
   if (!ownerLinked && WiFi.status() == WL_CONNECTED) {
-    centerText("Primero vincula la cuenta que cobrara", 278, 1, C_MUTED);
-    button(42, 300, 396, 76, C_CYAN, "VINCULAR CUENTA", C_BG, 3);
+    centerText("Configuracion inicial del propietario", 286, 1, C_MUTED);
+    button(42, 304, 396, 70, C_BLUE, "VINCULAR MERCADO PAGO", C_WHITE, 2);
   } else if (serviceActive && WiFi.status() == WL_CONNECTED) {
-    button(42, 300, 396, 76, C_GREEN, "INFLAR NEUMATICOS", C_BG, 3);
+    centerText("Estacione, conecte la manguera y comience", 286, 1, C_MUTED);
+    button(42, 304, 396, 70, C_GREEN, "INFLAR AHORA", C_BG, 3);
   } else {
-    button(42, 300, 396, 76, C_PANEL_2, "NO DISPONIBLE", C_MUTED, 2);
+    button(42, 304, 396, 70, C_PANEL_2, "NO DISPONIBLE", C_MUTED, 2);
   }
 
-  textAt(ownerLinked ? "MP VINCULADO" : "SIN CUENTA MP", 28, 425, 1,
-         ownerLinked ? C_GREEN : C_GOLD);
-  button(290, 406, 162, 48, C_PANEL_2, "PROBAR RELE", C_WHITE, 1);
+  badge(22, 405, 190, ownerLinked ? "COBROS ACTIVOS" : "CUENTA PENDIENTE",
+        ownerLinked ? C_GREEN : C_GOLD);
+  button(274, 397, 184, 48, C_PANEL_2, "PRUEBA TECNICA", C_WHITE, 1);
   animationPhase++;
 }
 
@@ -294,26 +348,28 @@ bool drawQr(const String &data, int centerX, int centerY, int maxPixels) {
 void showPaymentQr() {
   uiState = UI_WAITING_PAYMENT;
   clearScreen();
-  header("ESPERANDO PAGO", C_GOLD);
-  centerText("Escanea con Mercado Pago", 86, 2, C_WHITE);
-  if (!drawQr(paymentLink, 240, 270, 330)) {
+  header("PAGO SEGURO", C_GOLD);
+  centerText("ESCANEA PARA COMENZAR", 91, 2, C_WHITE);
+  card(67, 118, 346, 294, C_GOLD);
+  if (!drawQr(paymentLink, 240, 265, 272)) {
     showError("QR NO DISPONIBLE", "El enlace de pago es demasiado largo");
     return;
   }
-  centerText(moneyText(servicePrice) + " - " + durationText(serviceSeconds), 438, 2, C_CYAN);
+  badge(76, 428, 145, moneyText(servicePrice), C_GOLD);
+  badge(259, 428, 145, durationText(serviceSeconds), C_CYAN);
 }
 
 void drawCountdown(uint32_t remaining) {
-  display->fillRect(45, 190, 390, 130, C_BG);
+  display->fillRect(60, 190, 360, 118, C_PANEL);
   char value[12];
   snprintf(value, sizeof(value), "%02lu:%02lu",
            static_cast<unsigned long>(remaining / 60),
            static_cast<unsigned long>(remaining % 60));
-  centerText(value, 210, 7, C_WHITE);
+  centerText(value, 213, 7, C_WHITE);
 }
 
 void drawPrestartCountdown(uint32_t remaining) {
-  display->fillRect(155, 238, 170, 64, C_BG);
+  display->fillRect(155, 238, 170, 64, C_PANEL);
   centerText(String(remaining), 242, 6, C_GOLD);
 }
 
@@ -324,13 +380,14 @@ void startService(uint32_t seconds) {
   lastCountdownSecond = UINT32_MAX;
   uiState = UI_RUNNING;
   clearScreen();
-  header("INFLADOR ACTIVO", C_GREEN);
-  centerText("INFLANDO NEUMATICOS", 112, 3, C_GREEN);
-  centerText("Tiempo restante", 170, 2, C_MUTED);
+  header("SERVICIO EN CURSO", C_GREEN);
+  centerText("INFLADOR ACTIVO", 96, 3, C_GREEN);
+  card(42, 145, 396, 174, C_GREEN);
+  centerText("TIEMPO RESTANTE", 165, 1, C_MUTED);
   drawCountdown(serviceSeconds);
   drawAirPulse(animationPhase++);
-  centerText("Se apaga automaticamente", 385, 1, C_MUTED);
-  button(150, 414, 180, 42, C_RED, "DETENER", C_WHITE, 1);
+  centerText("El equipo se detiene automaticamente", 388, 1, C_MUTED);
+  button(150, 420, 180, 38, C_RED, "DETENER", C_WHITE, 1);
 }
 
 void startPreparation(uint32_t seconds) {
@@ -346,11 +403,12 @@ void startPreparation(uint32_t seconds) {
   uiState = UI_PREPARING;
   clearScreen();
   header("PAGO APROBADO", C_GREEN);
-  centerText("LISTO PARA USAR", 100, 4, C_GREEN);
-  centerText("Prepare la manguera", 160, 2, C_WHITE);
-  centerText("El inflador inicia en", 205, 2, C_MUTED);
+  centerText("TODO LISTO", 96, 4, C_GREEN);
+  card(62, 155, 356, 245, C_GREEN);
+  centerText("Prepare la manguera", 175, 2, C_WHITE);
+  centerText("Inicio automatico en", 215, 1, C_MUTED);
   drawPrestartCountdown(prestartSeconds);
-  drawTire(240, 350, 46, animationPhase, C_GREEN);
+  drawTire(240, 350, 38, animationPhase, C_GREEN);
   button(140, 420, 200, 38, C_GREEN, "INICIAR AHORA", C_BG, 1);
 }
 
@@ -361,9 +419,11 @@ void startRelayTest() {
   uiState = UI_RELAY_TEST;
   clearScreen();
   header("PRUEBA TECNICA", C_GOLD);
-  centerText("RELE GPIO 40 ACTIVO", 115, 3, C_GOLD);
-  centerText("Pulso de comprobacion", 175, 2, C_WHITE);
+  centerText("SALIDA GPIO 40", 103, 3, C_GOLD);
+  card(42, 155, 396, 185, C_GOLD);
+  centerText("RELE ACTIVO", 174, 2, C_WHITE);
   drawCountdown(relayTestSeconds);
+  centerText("Pulso de comprobacion seguro", 348, 1, C_MUTED);
   button(130, 390, 220, 58, C_RED, "APAGAR AHORA", C_WHITE, 2);
 }
 
@@ -373,9 +433,13 @@ void showThanks() {
   thanksEndsAt = millis() + 5000;
   clearScreen();
   header("SERVICIO FINALIZADO", C_GREEN);
-  centerText("GRACIAS", 145, 6, C_GREEN);
-  centerText("por usar EVETEC", 235, 3, C_WHITE);
-  centerText("Buen viaje!", 315, 2, C_CYAN);
+  display->fillCircle(240, 170, 58, C_GREEN);
+  display->drawCircle(240, 170, 64, C_CYAN);
+  display->drawLine(211, 171, 231, 190, C_WHITE);
+  display->drawLine(231, 190, 273, 145, C_WHITE);
+  centerText("GRACIAS", 258, 5, C_WHITE);
+  centerText("Tu vehiculo esta listo", 324, 2, C_CYAN);
+  centerText("Buen viaje", 375, 2, C_MUTED);
 }
 
 bool timeIsValid() {
@@ -619,13 +683,17 @@ void showWifiSetupScreen() {
   uiState = UI_WIFI_SETUP;
   clearScreen();
   header("CONFIGURAR WIFI", C_GOLD);
-  centerText("1. Conectate a:", 105, 2, C_WHITE);
-  centerText("EVETEC-INFLADOR-SETUP", 145, 2, C_CYAN);
-  centerText("Clave: 12345678", 185, 2, C_WHITE);
-  centerText("2. Abre 192.168.4.1", 235, 2, C_WHITE);
-  centerText("desde el navegador", 275, 2, C_MUTED);
-  button(105, 360, 270, 64, C_PANEL_2, "PROBAR RELE GPIO 40", C_WHITE, 1);
-  centerText("Funciona sin Internet", 440, 1, C_MUTED);
+  centerText("PUESTA EN MARCHA", 92, 2, C_WHITE);
+  card(32, 125, 416, 210, C_GOLD);
+  badge(52, 148, 48, "1", C_GOLD);
+  textAt("Conectate a la red", 118, 154, 1, C_MUTED);
+  textAt("EVETEC-INFLADOR-SETUP", 118, 178, 2, C_CYAN);
+  textAt("Clave  12345678", 118, 211, 1, C_WHITE);
+  badge(52, 255, 48, "2", C_CYAN);
+  textAt("Abre en tu navegador", 118, 261, 1, C_MUTED);
+  textAt("192.168.4.1", 118, 285, 2, C_WHITE);
+  button(87, 365, 306, 60, C_PANEL_2, "PROBAR RELE GPIO 40", C_WHITE, 1);
+  centerText("Disponible incluso sin Internet", 447, 1, C_MUTED);
 }
 
 void startWifiPortal() {

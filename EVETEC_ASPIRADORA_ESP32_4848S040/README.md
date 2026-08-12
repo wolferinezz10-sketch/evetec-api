@@ -38,9 +38,32 @@ GPIO40 es una señal de 3,3 V. Debe conectarse a un módulo de relé/contactor
 aislado y apto para la bobina/carga. La aspiradora nunca se conecta directamente
 al ESP32.
 
-## Compilar y cargar
+## Compilar y cargar con PlatformIO
 
-La compilación usa:
+El proyecto principal ahora usa PlatformIO y fija todas las versiones necesarias.
+Las bibliotecas especiales de esta pantalla (`Arduino_GFX 1.2.9`, `Touch_GT911`
+y `QRCode`) están incluidas en `lib/`, por lo que no hay que buscarlas ni
+instalarlas manualmente.
+
+Abrir esta carpeta desde VS Code con la extensión PlatformIO o ejecutar:
+
+```powershell
+python -m venv .venv-platformio
+.\.venv-platformio\Scripts\python.exe -m pip install -r requirements-platformio.txt
+.\.venv-platformio\Scripts\platformio.exe run
+.\.venv-platformio\Scripts\platformio.exe run --target upload
+```
+
+La configuración de placa, memoria, particiones y puerto está en
+`platformio.ini`. El firmware compilado queda en
+`.pio\build\esp32-4848s040\firmware.bin`.
+
+En `build/` también se guardan los binarios probados del firmware, bootloader y
+particiones, útiles para recuperar el dispositivo sin recompilar.
+
+## Compilación Arduino heredada
+
+La configuración anterior de Arduino CLI se conserva como referencia. Usa:
 
 - Arduino ESP32 core `esp32:esp32` 2.0.17.
 - GFX Library for Arduino 1.2.9.
@@ -56,6 +79,14 @@ esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDC
 
 Antes de proteger la API con `DEVICE_API_KEY`, cargar el mismo valor tanto en el
 entorno del backend como en la constante del firmware.
+
+## Interfaz de producto
+
+La interfaz utiliza una identidad visual EVETEC Automotive de alto contraste,
+tarjetas de información, estados consistentes y animaciones discretas. No usa
+imágenes externas ni archivos pesados: todos los elementos se dibujan en el
+ESP32 para mantener tiempos de respuesta previsibles y facilitar el reemplazo
+de una pantalla en campo.
 
 ## Configuración remota
 
