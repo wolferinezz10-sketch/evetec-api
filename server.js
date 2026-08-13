@@ -166,6 +166,7 @@ let devices = {
 };
 
 let pagosCreados = {};
+let usageEvents = {};
 
 function escaparHtml(v) {
   return String(v ?? "")
@@ -355,7 +356,7 @@ function guardarDatos() {
   try {
     fs.writeFileSync(
       DATA_FILE,
-      JSON.stringify({ devices, pagosCreados, configGlobal }, null, 2)
+      JSON.stringify({ devices, pagosCreados, usageEvents, configGlobal }, null, 2)
     );
   } catch (err) {
     console.error("Error guardando datos:", err.message);
@@ -379,6 +380,10 @@ function cargarDatos() {
 
     if (data.pagosCreados) {
       pagosCreados = data.pagosCreados;
+    }
+
+    if (data.usageEvents && typeof data.usageEvents === "object") {
+      usageEvents = data.usageEvents;
     }
 
     if (!devices[PROTOTYPE_DEVICE_ID]) {
@@ -422,11 +427,52 @@ function asegurarDevice(deviceId) {
   }
 
   if (!d.modoCobro) d.modoCobro = "owner_commission";
+  if (!Number.isFinite(Number(d.backupConfirmedCount))) d.backupConfirmedCount = 0;
+  if (typeof d.backupConfirmedAt === "undefined") d.backupConfirmedAt = null;
   if (!d.stats) d.stats = statsIniciales();
   if (!Array.isArray(d.stats.ultimosPagos)) d.stats.ultimosPagos = [];
   if (d.tipo === "arcade" && typeof d.arcadeCredits === "undefined") d.arcadeCredits = 0;
 
   return d;
+}
+
+function eventosUsoDevice(deviceId) {
+  const id = String(deviceId || "").trim().toUpperCase();
+  return Object.values(usageEvents)
+    .filter(e => e && e.device_id === id)
+    .sort((a, b) => Number(a.approved_epoch || 0) - Number(b.approved_epoch || 0));
+}
+
+function statsDesdeUso(deviceId) {
+  const events = eventosUsoDevice(deviceId);
+  const baseline = asegurarDevice(deviceId).ledgerBaseline || {};
+  const total = events.reduce((acc, e) => {
+    acc.totalRecaudado += Number(e.amount_cents || 0) / 100;
+    acc.segundosVendidos += Number(e.sold_seconds || 0);
+    acc.tiempoMotor += Number(e.actual_seconds || 0);
+    acc.gananciaEvetec += Number(e.evetec_cents || 0) / 100;
+    acc.gananciaDuenio += Number(e.owner_cents || 0) / 100;
+    if (e.completed === false) acc.interrumpidos += 1;
+    return acc;
+  }, {
+    totalRecaudado: Number(baseline.totalRecaudado || 0),
+    pagosAprobados: Number(baseline.pagosAprobados || 0) + events.length,
+    segundosVendidos: Number(baseline.segundosVendidos || 0),
+    tiempoMotor: Number(baseline.tiempoMotor || 0),
+    gananciaEvetec: 0,
+    gananciaDuenio: 0,
+    interrumpidos: 0,
+    ultimosPagos: []
+  });
+  total.ultimosPagos = events.slice(-30).reverse().map(e => ({
+    payment_id: e.payment_id || e.event_id,
+    monto: Number(e.amount_cents || 0) / 100,
+    segundos: Number(e.sold_seconds || 0),
+    actual_seconds: Number(e.actual_seconds || 0),
+    fecha: e.approved_epoch ? new Date(Number(e.approved_epoch) * 1000).toISOString() : null,
+    completed: e.completed !== false
+  }));
+  return total;
 }
 function aplicarDescuento(monto, descuento) {
   return Math.max(1, Math.round(Number(monto) * (1 - Number(descuento) / 100)));
@@ -988,6 +1034,8 @@ async function crearPagoMercadoPago(pedido) {
     creditos: pedido.creditos || 0,
     comisionEvetec: comision,
     netoDuenioEstimado,
+    modoCobro: d.modoCobro,
+    usandoOwner,
     estado: "pending",
     link,
     creado: new Date().toISOString()
@@ -1410,12 +1458,83 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
       status: "approved",
       payment_id: estado.payment_id,
       monto: Number(pagoLocal.monto || 0),
-      segundos: Math.max(1, Math.min(3600, Number(pagoLocal.segundos || 0)))
+      segundos: Math.max(1, Math.min(3600, Number(pagoLocal.segundos || 0))),
+      approved_epoch: Math.floor(Date.now() / 1000),
+      modo_cobro: pagoLocal.modoCobro || "evetec",
+      comision_evetec: Number(pagoLocal.comisionEvetec || 0),
+      neto_duenio: Number(pagoLocal.usandoOwner ? pagoLocal.netoDuenioEstimado || 0 : 0),
+      ganancia_evetec: Number(pagoLocal.usandoOwner ? pagoLocal.comisionEvetec || 0 : pagoLocal.monto || 0)
     });
   } catch (err) {
     console.error("Error /device/claim-payment:", err.message);
     return res.status(500).json({ ok: false, activate: false, status: "server_error" });
   }
+});
+
+app.get("/device/usage-status/:deviceId", requireDevice, (req, res) => {
+  const deviceId = String(req.params.deviceId || "").trim().toUpperCase();
+  const events = eventosUsoDevice(deviceId);
+  const latest = events.length ? events[events.length - 1].event_id : "";
+  res.json({
+    ok: true,
+    count: events.length,
+    latest_event_id: latest,
+    server_epoch: Math.floor(Date.now() / 1000)
+  });
+});
+
+app.post("/device/usage-sync", requireDevice, (req, res) => {
+  const deviceId = String(req.body.device_id || req.body.deviceId || "").trim().toUpperCase();
+  const incoming = Array.isArray(req.body.events) ? req.body.events.slice(0, 20) : [];
+  if (!deviceId || !devices[deviceId]) {
+    return res.status(404).json({ ok: false, error: "device_not_found" });
+  }
+
+  const d = asegurarDevice(deviceId);
+  if (incoming.length && !d.ledgerBaseline && eventosUsoDevice(deviceId).length === 0) {
+    const incomingAmount = incoming.reduce((n, e) => n + Number(e.amount_cents || 0) / 100, 0);
+    const incomingSeconds = incoming.reduce((n, e) => n + Number(e.sold_seconds || 0), 0);
+    d.ledgerBaseline = {
+      totalRecaudado: Math.max(0, Number(d.stats?.totalRecaudado || 0) - incomingAmount),
+      pagosAprobados: Math.max(0, Number(d.stats?.pagosAprobados || 0) - incoming.length),
+      segundosVendidos: Math.max(0, Number(d.stats?.segundosVendidos || 0) - incomingSeconds),
+      tiempoMotor: Math.max(0, Number(d.stats?.tiempoMotor || 0) - incomingSeconds)
+    };
+  }
+
+  let accepted = 0;
+  for (const source of incoming) {
+    const eventId = String(source.event_id || source.payment_id || "").trim().slice(0, 120);
+    if (!eventId || usageEvents[eventId]) continue;
+    const amountCents = Math.max(0, Math.round(Number(source.amount_cents || 0)));
+    const evetecCents = Math.max(0, Math.min(amountCents, Math.round(Number(source.evetec_cents || 0))));
+    const ownerCents = Math.max(0, Math.min(amountCents, Math.round(Number(source.owner_cents || 0))));
+    usageEvents[eventId] = {
+      event_id: eventId,
+      payment_id: String(source.payment_id || eventId).slice(0, 120),
+      device_id: deviceId,
+      approved_epoch: Math.max(0, Math.round(Number(source.approved_epoch || 0))),
+      started_epoch: Math.max(0, Math.round(Number(source.started_epoch || 0))),
+      finished_epoch: Math.max(0, Math.round(Number(source.finished_epoch || 0))),
+      amount_cents: amountCents,
+      sold_seconds: Math.max(0, Math.min(86400, Math.round(Number(source.sold_seconds || 0)))),
+      actual_seconds: Math.max(0, Math.min(86400, Math.round(Number(source.actual_seconds || 0)))),
+      evetec_cents: evetecCents,
+      owner_cents: ownerCents,
+      mode: String(source.mode || "evetec").slice(0, 30),
+      completed: source.completed !== false,
+      synced_at: new Date().toISOString()
+    };
+    accepted += 1;
+  }
+  if (accepted) guardarDatos();
+  const events = eventosUsoDevice(deviceId);
+  res.json({
+    ok: true,
+    accepted,
+    count: events.length,
+    latest_event_id: events.length ? events[events.length - 1].event_id : ""
+  });
 });
 
 // =====================================================
@@ -1824,27 +1943,30 @@ app.get("/admin", (req, res) => {
   const id = PROTOTYPE_DEVICE_ID;
   const d = asegurarDevice(id);
   const cfg = configGlobal.basic;
-  const stats = d.stats || statsIniciales();
+  const usageList = eventosUsoDevice(id);
+  const stats = usageList.length ? statsDesdeUso(id) : (d.stats || statsIniciales());
   const ultimoPago = stats.ultimosPagos?.[0] || null;
   const ultimaConexion = d.ultimaConexion
     ? new Date(d.ultimaConexion).toLocaleString("es-AR")
     : "Nunca";
-  const pagos = Object.values(pagosCreados)
-    .filter((p, index, arr) => p.device_id === id && arr.findIndex(x => x.external_reference === p.external_reference) === index)
-    .slice(-15)
-    .reverse();
+  const pagos = usageList.slice(-30).reverse();
+  const backupConfirmedCount = Math.max(0, Number(d.backupConfirmedCount || 0));
+  const paymentsSinceBackup = Math.max(0, usageList.length - backupConfirmedCount);
+  const backupDue = paymentsSinceBackup >= 4000;
+  const backupProgress = Math.min(100, (paymentsSinceBackup / 4000) * 100);
 
   let pagosHtml = pagos.map(p => `
     <tr>
-      <td>${escaparHtml(new Date(p.fecha || p.created_at || Date.now()).toLocaleString("es-AR"))}</td>
-      <td>${escaparHtml(p.external_reference || "-")}</td>
-      <td>$${formatoDinero(p.monto)}</td>
-      <td>${formatoTiempo(p.segundos)}</td>
-      <td><span class="pill ${p.estado === "approved" ? "success" : "muted"}">${escaparHtml(p.estado || "pendiente")}</span></td>
+      <td>${escaparHtml(p.approved_epoch ? new Date(Number(p.approved_epoch) * 1000).toLocaleString("es-AR") : "Sin fecha")}</td>
+      <td>${escaparHtml(p.payment_id || p.event_id || "-")}</td>
+      <td>$${formatoDinero(Number(p.amount_cents || 0) / 100)}</td>
+      <td>${formatoTiempo(p.sold_seconds)}</td>
+      <td>${formatoTiempo(p.actual_seconds)}</td>
+      <td><span class="pill ${p.completed === false ? "warning" : "success"}">${p.completed === false ? "Interrumpido" : "Completado"}</span></td>
     </tr>
   `).join("");
 
-  if (!pagosHtml) pagosHtml = `<tr><td colspan="5" class="empty">Todavía no hay pagos registrados para este equipo.</td></tr>`;
+  if (!pagosHtml) pagosHtml = `<tr><td colspan="6" class="empty">Todavía no hay servicios sincronizados desde este equipo.</td></tr>`;
 
   res.send(`<!doctype html>
   <html lang="es">
@@ -1862,6 +1984,7 @@ app.get("/admin", (req, res) => {
       h2{margin:0 0 18px;font-size:20px}h3{margin:25px 0 12px;color:var(--cyan);font-size:14px;text-transform:uppercase;letter-spacing:.08em}.form-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:15px}.field{display:flex;flex-direction:column;gap:7px}.wide{grid-column:1/-1}label{font-weight:650}input,select{width:100%;background:#091522;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:11px 12px;font:inherit;outline:none}input:focus,select:focus{border-color:var(--cyan)}
       .switches{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px}.check{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}.check input{width:auto;margin:0}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:20px}.btn{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:10px;padding:11px 15px;text-decoration:none;font-weight:800;cursor:pointer}.primary{background:var(--cyan);color:#03141a}.secondary{background:#20344a;color:var(--text);border:1px solid #34506d}.danger{background:#421d29;color:#ffb3bc;border:1px solid #7b3041}
       .owner{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}.owner-line{display:flex;justify-content:space-between;gap:12px;margin:8px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800}.success{background:#123d2d;color:#70f0ad}.muted{background:#293746;color:#b9c7d5}.warning{background:#493b18;color:#ffe08a}
+      .backup{margin-bottom:16px;border-color:${backupDue ? "var(--yellow)" : "var(--line)"};background:${backupDue ? "linear-gradient(145deg,#352c14,#171b20)" : "linear-gradient(145deg,var(--panel),#0c1826)"}}.backup-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}.backup h2{margin-bottom:7px}.progress{height:10px;border-radius:999px;background:#07111f;overflow:hidden;margin-top:16px}.progress span{display:block;height:100%;width:${backupProgress}%;background:${backupDue ? "var(--yellow)" : "var(--cyan)"};border-radius:inherit}.backup-alert{color:var(--yellow);font-weight:850}
       table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.empty{text-align:center;color:var(--muted);padding:25px}.footer{margin-top:14px;color:var(--muted);font-size:12px}
       @media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}}
     </style>
@@ -1872,11 +1995,17 @@ app.get("/admin", (req, res) => {
       <div class="status"><span class="dot"></span>${d.online ? "Equipo online" : "Equipo offline"}</div>
     </header>
 
+    <section class="card backup">
+      <div class="backup-head"><div><h2>${backupDue ? "Respaldo externo requerido" : "Respaldo local del equipo"}</h2><div class="${backupDue ? "backup-alert" : "hint"}">${backupDue ? `Ya se acumularon ${paymentsSinceBackup} pagos desde el ultimo respaldo. Descarga el CSV y confirmalo.` : `${paymentsSinceBackup} de 4.000 pagos para el proximo aviso de respaldo.`}</div></div><span class="pill ${backupDue ? "warning" : "success"}">${usageList.length} guardados</span></div>
+      <div class="progress"><span></span></div>
+      <div class="actions"><a class="btn secondary" href="/admin/prototype/usage-backup.csv">Descargar respaldo CSV</a>${backupDue ? `<form method="POST" action="/admin/prototype/backup-confirm"><button class="btn primary" type="submit">Marcar respaldo realizado</button></form>` : ""}</div>
+    </section>
+
     <section class="stats">
       <div class="card stat"><span class="label">Recaudado</span><b>$${formatoDinero(stats.totalRecaudado)}</b></div>
       <div class="card stat"><span class="label">Pagos aprobados</span><b>${stats.pagosAprobados || 0}</b></div>
       <div class="card stat"><span class="label">Tiempo vendido</span><b>${formatoTiempo(stats.segundosVendidos)}</b></div>
-      <div class="card stat"><span class="label">Último pago</span><b>${ultimoPago ? `$${formatoDinero(ultimoPago.monto)}` : "—"}</b></div>
+      <div class="card stat"><span class="label">Uso real</span><b>${formatoTiempo(stats.tiempoMotor)}</b></div>
     </section>
 
     <section class="columns">
@@ -1926,7 +2055,7 @@ app.get("/admin", (req, res) => {
       </aside>
     </section>
 
-    <section class="card" style="margin-top:16px"><h2>Últimos pagos de esta aspiradora</h2><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Referencia</th><th>Monto</th><th>Tiempo</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
+    <section class="card" style="margin-top:16px"><h2>Servicios confirmados por el equipo</h2><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Pago</th><th>Monto</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
     <div class="footer">Los cambios de precio y tiempos son consultados automáticamente por la pantalla. Base: ${escaparHtml(PUBLIC_BASE_URL)}</div>
   </main></body></html>`);
 });
@@ -2330,6 +2459,44 @@ function renderLegacyAdminDisabled(req, res) {
 // =====================================================
 // ACCIONES ADMIN
 // =====================================================
+
+function celdaCsv(value) {
+  let text = String(value ?? "");
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+app.get("/admin/prototype/usage-backup.csv", (req, res) => {
+  const events = eventosUsoDevice(PROTOTYPE_DEVICE_ID);
+  const columns = [
+    "event_id", "payment_id", "device_id", "approved_at", "started_at", "finished_at",
+    "amount_ars", "sold_seconds", "actual_seconds", "evetec_ars", "owner_ars", "mode", "completed"
+  ];
+  const rows = events.map(e => [
+    e.event_id, e.payment_id, e.device_id,
+    e.approved_epoch ? new Date(Number(e.approved_epoch) * 1000).toISOString() : "",
+    e.started_epoch ? new Date(Number(e.started_epoch) * 1000).toISOString() : "",
+    e.finished_epoch ? new Date(Number(e.finished_epoch) * 1000).toISOString() : "",
+    (Number(e.amount_cents || 0) / 100).toFixed(2),
+    Number(e.sold_seconds || 0), Number(e.actual_seconds || 0),
+    (Number(e.evetec_cents || 0) / 100).toFixed(2),
+    (Number(e.owner_cents || 0) / 100).toFixed(2),
+    e.mode || "", e.completed !== false ? "yes" : "no"
+  ]);
+  const csv = "\uFEFF" + [columns, ...rows].map(row => row.map(celdaCsv).join(",")).join("\r\n");
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.set("Content-Type", "text/csv; charset=utf-8");
+  res.set("Content-Disposition", `attachment; filename="evetec-${PROTOTYPE_DEVICE_ID}-${stamp}.csv"`);
+  res.send(csv);
+});
+
+app.post("/admin/prototype/backup-confirm", (req, res) => {
+  const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
+  d.backupConfirmedCount = eventosUsoDevice(PROTOTYPE_DEVICE_ID).length;
+  d.backupConfirmedAt = new Date().toISOString();
+  guardarDatos();
+  res.redirect("/admin");
+});
 
 app.post("/admin/prototype/update", (req, res) => {
   const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
