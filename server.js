@@ -1884,7 +1884,8 @@ app.get("/admin", (req, res) => {
           <div class="form-grid">
             <div class="field wide"><label>Nombre visible</label><input name="nombre" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></div>
             <div class="field"><label>Precio (ARS)</label><input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></div>
-            <div class="field"><label>Duración del servicio (segundos)</label><input name="segundos" type="number" min="1" max="3600" value="${Number(cfg.segundos)}" required></div>
+            <div class="field"><label>Duración: minutos</label><input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos) / 60)}" required></div>
+            <div class="field"><label>Duración: segundos</label><input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos) % 60}" required></div>
             <div class="field"><label>Espera antes de encender (segundos)</label><input name="preinicioSegundos" type="number" min="0" max="120" value="${Number(cfg.preinicioSegundos)}" required></div>
             <div class="field"><label>Prueba de relé (segundos)</label><input name="pruebaReleSegundos" type="number" min="1" max="10" value="${Number(cfg.pruebaReleSegundos)}" required></div>
             <div class="field"><label>Tipo de cobro</label><select name="modoCobro">
@@ -2329,7 +2330,9 @@ app.post("/admin/prototype/update", (req, res) => {
   const activo = req.body.activo === "on";
   const modo = String(req.body.modoCobro || "owner_commission");
   const monto = Number(req.body.monto);
-  const segundos = Number(req.body.segundos);
+  const minutosServicio = Number(req.body.minutos);
+  const segundosServicio = Number(req.body.segundosServicio);
+  const segundosAnteriores = Number(req.body.segundos);
   const preinicio = Number(req.body.preinicioSegundos);
   const prueba = Number(req.body.pruebaReleSegundos);
   const comision = Number(req.body.comision);
@@ -2342,7 +2345,15 @@ app.post("/admin/prototype/update", (req, res) => {
   cfg.descripcion = String(req.body.descripcion || cfg.descripcion).trim().slice(0, 120);
 
   if (Number.isFinite(monto) && monto > 0) cfg.monto = Math.round(monto * 100) / 100;
-  if (Number.isFinite(segundos)) cfg.segundos = Math.max(1, Math.min(3600, Math.round(segundos)));
+  if (Number.isFinite(minutosServicio) && Number.isFinite(segundosServicio)) {
+    const minutosValidos = Math.max(0, Math.min(60, Math.round(minutosServicio)));
+    const segundosValidos = Math.max(0, Math.min(59, Math.round(segundosServicio)));
+    const duracionTotal = minutosValidos * 60 + segundosValidos;
+    cfg.segundos = Math.max(1, Math.min(3600, duracionTotal));
+  } else if (Number.isFinite(segundosAnteriores)) {
+    // Compatibilidad con formularios o integraciones anteriores.
+    cfg.segundos = Math.max(1, Math.min(3600, Math.round(segundosAnteriores)));
+  }
   if (Number.isFinite(preinicio)) cfg.preinicioSegundos = Math.max(0, Math.min(120, Math.round(preinicio)));
   if (Number.isFinite(prueba)) cfg.pruebaReleSegundos = Math.max(1, Math.min(10, Math.round(prueba)));
   if (Number.isFinite(comision)) d.comisionEvetecPorcentaje = Math.max(0, Math.min(100, comision));

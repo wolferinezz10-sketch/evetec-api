@@ -92,7 +92,7 @@ try {
   console.log(JSON.stringify({
     admin_prototype_visible: adminHtml.includes("ASPIRADORA_BASIC_001"),
     admin_has_owner_controls: adminHtml.includes("Cambiar cuenta dueña") || adminHtml.includes("Vincular cuenta dueña"),
-    admin_has_service_controls: adminHtml.includes("Duración del servicio") && adminHtml.includes("Tipo de cobro"),
+    admin_has_service_controls: adminHtml.includes('name="minutos"') && adminHtml.includes('name="segundosServicio"') && adminHtml.includes("Tipo de cobro"),
     admin_has_other_products: /Gachapon|Galaga|Premium: 3 precios/.test(adminHtml)
   }));
 
@@ -107,7 +107,8 @@ try {
       activo: "on",
       nombre: "Aspiradora QR",
       monto: "12",
-      segundos: "245",
+      minutos: "4",
+      segundosServicio: "5",
       preinicioSegundos: "10",
       pruebaReleSegundos: "2",
       modoCobro: "owner_direct",
