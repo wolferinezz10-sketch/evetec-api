@@ -156,6 +156,7 @@ function nuevoDevice(tipo = "premium") {
 
     comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE,
     modoCobro: "owner_commission",
+    registroVentasHabilitado: true,
 
     stats: statsIniciales()
   };
@@ -427,6 +428,7 @@ function asegurarDevice(deviceId) {
   }
 
   if (!d.modoCobro) d.modoCobro = "owner_commission";
+  if (typeof d.registroVentasHabilitado === "undefined") d.registroVentasHabilitado = true;
   if (!Number.isFinite(Number(d.backupConfirmedCount))) d.backupConfirmedCount = 0;
   if (typeof d.backupConfirmedAt === "undefined") d.backupConfirmedAt = null;
   if (!d.stats) d.stats = statsIniciales();
@@ -807,6 +809,7 @@ app.get("/config/:deviceId", (req, res) => {
       descripcion: configGlobal.basic.descripcion,
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
       modoCobro: d.modoCobro,
+      registro_ventas_habilitado: d.registroVentasHabilitado !== false,
       mantenimiento: d.modoMantenimiento,
       serverTime: new Date().toISOString()
     });
@@ -1449,7 +1452,9 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
 
     pagoLocal.consumidoAt = new Date().toISOString();
     pagoLocal.consumidoPor = deviceId;
-    registrarPagoVerificado(pagoLocal, estado.payment_id);
+    const registrarVenta = asegurarDevice(deviceId).registroVentasHabilitado !== false;
+    if (registrarVenta) registrarPagoVerificado(pagoLocal, estado.payment_id);
+    else pagoLocal.registroOmitidoPorModoPrueba = true;
     guardarDatos();
 
     return res.json({
@@ -1463,7 +1468,8 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
       modo_cobro: pagoLocal.modoCobro || "evetec",
       comision_evetec: Number(pagoLocal.comisionEvetec || 0),
       neto_duenio: Number(pagoLocal.usandoOwner ? pagoLocal.netoDuenioEstimado || 0 : 0),
-      ganancia_evetec: Number(pagoLocal.usandoOwner ? pagoLocal.comisionEvetec || 0 : pagoLocal.monto || 0)
+      ganancia_evetec: Number(pagoLocal.usandoOwner ? pagoLocal.comisionEvetec || 0 : pagoLocal.monto || 0),
+      registrar_venta: registrarVenta
     });
   } catch (err) {
     console.error("Error /device/claim-payment:", err.message);
@@ -1985,6 +1991,7 @@ app.get("/admin", (req, res) => {
       .switches{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px}.check{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}.check input{width:auto;margin:0}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:20px}.btn{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:10px;padding:11px 15px;text-decoration:none;font-weight:800;cursor:pointer}.primary{background:var(--cyan);color:#03141a}.secondary{background:#20344a;color:var(--text);border:1px solid #34506d}.danger{background:#421d29;color:#ffb3bc;border:1px solid #7b3041}
       .owner{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}.owner-line{display:flex;justify-content:space-between;gap:12px;margin:8px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800}.success{background:#123d2d;color:#70f0ad}.muted{background:#293746;color:#b9c7d5}.warning{background:#493b18;color:#ffe08a}
       .backup{margin-bottom:16px;border-color:${backupDue ? "var(--yellow)" : "var(--line)"};background:${backupDue ? "linear-gradient(145deg,#352c14,#171b20)" : "linear-gradient(145deg,var(--panel),#0c1826)"}}.backup-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}.backup h2{margin-bottom:7px}.progress{height:10px;border-radius:999px;background:#07111f;overflow:hidden;margin-top:16px}.progress span{display:block;height:100%;width:${backupProgress}%;background:${backupDue ? "var(--yellow)" : "var(--cyan)"};border-radius:inherit}.backup-alert{color:var(--yellow);font-weight:850}
+      .test-mode{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:16px;border-color:${d.registroVentasHabilitado !== false ? "#216846" : "var(--yellow)"};background:${d.registroVentasHabilitado !== false ? "linear-gradient(145deg,#102a22,#0c1826)" : "linear-gradient(145deg,#352c14,#171b20)"}}.test-mode h2{margin-bottom:6px}.test-mode form{flex:0 0 auto}.test-mode .btn{min-width:210px}@media(max-width:650px){.test-mode{align-items:stretch;flex-direction:column}.test-mode form,.test-mode .btn{width:100%}}
       table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.empty{text-align:center;color:var(--muted);padding:25px}.footer{margin-top:14px;color:var(--muted);font-size:12px}
       @media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}}
     </style>
@@ -1994,6 +2001,11 @@ app.get("/admin", (req, res) => {
       <div><div class="brand">EVETEC AUTOMOTIVE</div><h1>Aspiradora QR</h1><div class="sub">Administración exclusiva del prototipo <b>${id}</b></div></div>
       <div class="status"><span class="dot"></span>${d.online ? "Equipo online" : "Equipo offline"}</div>
     </header>
+
+    <section class="card test-mode">
+      <div><h2>${d.registroVentasHabilitado !== false ? "Registro de ventas activo" : "Modo prueba activo"}</h2><div class="${d.registroVentasHabilitado !== false ? "hint" : "backup-alert"}">${d.registroVentasHabilitado !== false ? "Los próximos pagos aprobados sumarán ganancias, usos y respaldo." : "Los próximos cobros accionarán el equipo, pero no se guardarán como ventas ni usos reales."}</div></div>
+      <form method="POST" action="/admin/prototype/toggle-sales-log"><button class="btn ${d.registroVentasHabilitado !== false ? "danger" : "primary"}" type="submit">${d.registroVentasHabilitado !== false ? "Activar modo prueba" : "Reactivar ventas reales"}</button></form>
+    </section>
 
     <section class="card backup">
       <div class="backup-head"><div><h2>${backupDue ? "Respaldo externo requerido" : "Respaldo local del equipo"}</h2><div class="${backupDue ? "backup-alert" : "hint"}">${backupDue ? `Ya se acumularon ${paymentsSinceBackup} pagos desde el ultimo respaldo. Descarga el CSV y confirmalo.` : `${paymentsSinceBackup} de 4.000 pagos para el proximo aviso de respaldo.`}</div></div><span class="pill ${backupDue ? "warning" : "success"}">${usageList.length} guardados</span></div>
@@ -2496,6 +2508,13 @@ app.post("/admin/prototype/backup-confirm", (req, res) => {
   const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
   d.backupConfirmedCount = eventosUsoDevice(PROTOTYPE_DEVICE_ID).length;
   d.backupConfirmedAt = new Date().toISOString();
+  guardarDatos();
+  res.redirect("/admin");
+});
+
+app.post("/admin/prototype/toggle-sales-log", (req, res) => {
+  const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
+  d.registroVentasHabilitado = d.registroVentasHabilitado === false;
   guardarDatos();
   res.redirect("/admin");
 });
