@@ -102,6 +102,7 @@ let configGlobal = {
     activo: true,
     nombre: "Inflado de neumaticos",
     segundos: 240,
+    preinicioHabilitado: true,
     preinicioSegundos: 15,
     pruebaReleSegundos: 3,
     monto: 10,
@@ -259,6 +260,7 @@ function asegurarEstructuraConfig() {
       activo: true,
       nombre: "Inflado de neumaticos",
       segundos: 240,
+      preinicioHabilitado: true,
       preinicioSegundos: 15,
       pruebaReleSegundos: 3,
       monto: 10,
@@ -268,6 +270,9 @@ function asegurarEstructuraConfig() {
   }
   if (!Number.isFinite(Number(configGlobal.basic.preinicioSegundos))) {
     configGlobal.basic.preinicioSegundos = 15;
+  }
+  if (typeof configGlobal.basic.preinicioHabilitado !== "boolean") {
+    configGlobal.basic.preinicioHabilitado = true;
   }
   if (!Number.isFinite(Number(configGlobal.basic.pruebaReleSegundos))) {
     configGlobal.basic.pruebaReleSegundos = 3;
@@ -749,6 +754,7 @@ app.get("/config/:deviceId", (req, res) => {
       precio: Number(configGlobal.basic.monto),
       monto: Number(configGlobal.basic.monto),
       segundos: Number(configGlobal.basic.segundos),
+      preinicio_habilitado: configGlobal.basic.preinicioHabilitado !== false,
       preinicio_segundos: Number(configGlobal.basic.preinicioSegundos || 15),
       prueba_rele_segundos: Number(configGlobal.basic.pruebaReleSegundos || 3),
       nombre: configGlobal.basic.nombre,
@@ -1880,6 +1886,7 @@ app.get("/admin", (req, res) => {
           <div class="switches">
             <label class="check"><input type="checkbox" name="activo" ${d.activo && cfg.activo ? "checked" : ""}> Equipo habilitado</label>
             <label class="check"><input type="checkbox" name="mantenimiento" ${d.modoMantenimiento ? "checked" : ""}> Modo mantenimiento</label>
+            <label class="check"><input type="checkbox" name="preinicioHabilitado" ${cfg.preinicioHabilitado !== false ? "checked" : ""}> Espera antes de encender</label>
           </div>
           <div class="form-grid">
             <div class="field wide"><label>Nombre visible</label><input name="nombre" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></div>
@@ -2341,6 +2348,7 @@ app.post("/admin/prototype/update", (req, res) => {
   cfg.activo = activo;
   d.activo = activo;
   d.modoMantenimiento = req.body.mantenimiento === "on";
+  cfg.preinicioHabilitado = req.body.preinicioHabilitado === "on";
   cfg.nombre = String(req.body.nombre || cfg.nombre).trim().slice(0, 60);
   cfg.descripcion = String(req.body.descripcion || cfg.descripcion).trim().slice(0, 120);
 

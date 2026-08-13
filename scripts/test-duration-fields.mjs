@@ -57,6 +57,7 @@ try {
       monto: "125",
       minutos: "2",
       segundosServicio: "37",
+      preinicioHabilitado: "on",
       preinicioSegundos: "10",
       pruebaReleSegundos: "2",
       modoCobro: "evetec",
@@ -69,8 +70,24 @@ try {
   const config = await fetch(`http://127.0.0.1:${port}/config/ASPIRADORA_BASIC_001`)
     .then(result => result.json());
   if (config.segundos !== 157) throw new Error(`Duración incorrecta: ${config.segundos}`);
+  if (config.preinicio_habilitado !== true) throw new Error("No se guardó la espera habilitada");
 
-  console.log("OK: 2 minutos + 37 segundos = 157 segundos");
+  const disabledBody = new URLSearchParams({
+    activo: "on", nombre: "Inflador Demo", monto: "125", minutos: "2",
+    segundosServicio: "37", preinicioSegundos: "10", pruebaReleSegundos: "2",
+    modoCobro: "evetec", comision: "100", descripcion: "Prueba de duración"
+  });
+  await fetch(`http://127.0.0.1:${port}/admin/prototype/update`, {
+    method: "POST", redirect: "manual",
+    headers: { authorization: auth, "content-type": "application/x-www-form-urlencoded" },
+    body: disabledBody
+  });
+  const disabledConfig = await fetch(`http://127.0.0.1:${port}/config/ASPIRADORA_BASIC_001`)
+    .then(result => result.json());
+  if (disabledConfig.preinicio_habilitado !== false)
+    throw new Error("No se guardó la espera deshabilitada");
+
+  console.log("OK: duración precisa y espera activable/desactivable");
 } finally {
   child.kill();
   if (fs.existsSync(dataFile)) fs.rmSync(dataFile, { force: true });

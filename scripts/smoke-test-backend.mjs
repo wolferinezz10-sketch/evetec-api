@@ -109,6 +109,7 @@ try {
       monto: "12",
       minutos: "4",
       segundosServicio: "5",
+      preinicioHabilitado: "on",
       preinicioSegundos: "10",
       pruebaReleSegundos: "2",
       modoCobro: "owner_direct",
