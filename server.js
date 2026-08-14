@@ -455,14 +455,19 @@ function asegurarDevice(deviceId) {
     const source = d.participantes[index] || {};
     return {
       id: `p${index + 1}`,
-      nombre: String(typeof source.nombre === "undefined"
+      nombre: index === 0 ? "EVETEC" : String(typeof source.nombre === "undefined"
         ? (participantesSinConfigurar && index === 0 ? "EVETEC" : "")
         : source.nombre).slice(0, 40),
       porcentaje: Math.max(0, Math.min(100, Number(
         typeof source.porcentaje === "undefined"
           ? (participantesSinConfigurar && index === 0 ? 100 : 0)
           : source.porcentaje
-      )))
+      ))),
+      linked: index === 0 ? true : Boolean(source.linked && source.accessToken),
+      accessToken: index === 0 ? null : (source.accessToken || null),
+      refreshToken: index === 0 ? null : (source.refreshToken || null),
+      userId: index === 0 ? null : (source.userId || null),
+      email: index === 0 ? "" : String(source.email || "").slice(0, 100)
     };
   });
   const participantesActivos = d.participantes.filter(p => p.nombre && Number(p.porcentaje) > 0).length;
@@ -472,6 +477,7 @@ function asegurarDevice(deviceId) {
   }
   if (!Number.isFinite(Number(d.backupConfirmedCount))) d.backupConfirmedCount = 0;
   if (typeof d.backupConfirmedAt === "undefined") d.backupConfirmedAt = null;
+  if (!d.participantLinkRequest || typeof d.participantLinkRequest !== "object") d.participantLinkRequest = null;
   if (!d.configuracionServicio || typeof d.configuracionServicio !== "object") {
     d.configuracionServicio = { ...configGlobal.basic };
   }
@@ -654,6 +660,14 @@ function estadoOperativo(deviceId) {
 function obtenerTokenParaCobrar(deviceId) {
   const d = asegurarDevice(deviceId);
 
+  if (d.modoCobro === "evetec") {
+    return {
+      token: EVETEC_MP_TOKEN,
+      usandoOwner: false,
+      cuentaCobro: "evetec"
+    };
+  }
+
   if (
     (d.modoCobro === "owner_direct" || d.modoCobro === "owner_commission") &&
     d.ownerLinked &&
@@ -661,13 +675,15 @@ function obtenerTokenParaCobrar(deviceId) {
   ) {
     return {
       token: d.ownerAccessToken,
-      usandoOwner: true
+      usandoOwner: true,
+      cuentaCobro: "owner"
     };
   }
 
   return {
-    token: EVETEC_MP_TOKEN,
-    usandoOwner: false
+    token: null,
+    usandoOwner: false,
+    cuentaCobro: "owner_required"
   };
 }
 
@@ -889,6 +905,7 @@ app.get("/config/:deviceId", (req, res) => {
         descripcion: p.descripcion || ""
       })),
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      evetecAccountReady: Boolean(EVETEC_MP_TOKEN),
       modoCobro: d.modoCobro,
       comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
       serverTime: new Date().toISOString()
@@ -911,11 +928,22 @@ app.get("/config/:deviceId", (req, res) => {
       nombre: cfg.nombre,
       descripcion: cfg.descripcion,
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      evetecAccountReady: Boolean(EVETEC_MP_TOKEN),
       modoCobro: d.modoCobro,
       registro_ventas_habilitado: d.registroVentasHabilitado !== false,
-      participantes: d.participantes,
+      participantes: d.participantes.map(p => ({
+        id: p.id,
+        nombre: p.nombre,
+        porcentaje: p.porcentaje,
+        linked: p.id === "p1" ? Boolean(EVETEC_MP_TOKEN) : Boolean(p.linked && p.accessToken),
+        userId: p.userId || null
+      })),
       pagador_comision_mp: d.pagadorComisionMp,
       cantidad_participantes: d.cantidadParticipantes,
+      participant_link_pending: d.participantLinkRequest ? {
+        participant_id: d.participantLinkRequest.participantId,
+        alias: d.participantLinkRequest.alias
+      } : null,
       mantenimiento: d.modoMantenimiento,
       serverTime: new Date().toISOString()
     });
@@ -1784,6 +1812,46 @@ app.get("/oauth/link/:deviceId", (req, res) => {
   }
 });
 
+app.get("/oauth/participant-link/:deviceId/:participantId", (req, res) => {
+  try {
+    const deviceId = String(req.params.deviceId || "").trim().toUpperCase();
+    const participantId = String(req.params.participantId || "").trim().toLowerCase();
+    const d = asegurarDevice(deviceId);
+    const participant = d.participantes.find(p => p.id === participantId);
+    if (!participant || participantId === "p1") {
+      return res.status(404).json({ ok: false, error: "participante_invalido" });
+    }
+    if (!MP_CLIENT_ID) return res.status(503).json({ ok: false, error: "Falta MP_CLIENT_ID" });
+
+    const stateToken = crypto.randomBytes(24).toString("hex");
+    oauthStates.set(stateToken, {
+      deviceId,
+      participantId,
+      expiresAt: Date.now() + 10 * 60 * 1000
+    });
+    for (const [key, value] of oauthStates) {
+      if (value.expiresAt < Date.now()) oauthStates.delete(key);
+    }
+    const url =
+      "https://auth.mercadopago.com.ar/authorization" +
+      `?response_type=code` +
+      `&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
+      `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+      `&state=${encodeURIComponent(stateToken)}`;
+    const qr = generarQRMatrix(url);
+    res.json({
+      ok: true,
+      url,
+      alias: participant.nombre || participantId,
+      participant_id: participantId,
+      qr_size: qr.qr_size,
+      qr_matrix: qr.qr_matrix
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/oauth/callback", async (req, res) => {
   const code = req.query.code;
   const stateToken = String(req.query.state || "");
@@ -1791,6 +1859,9 @@ app.get("/oauth/callback", async (req, res) => {
   oauthStates.delete(stateToken);
   const deviceId = stateData && stateData.expiresAt >= Date.now()
     ? String(stateData.deviceId || "").toUpperCase()
+    : "";
+  const participantId = stateData && stateData.expiresAt >= Date.now()
+    ? String(stateData.participantId || "").toLowerCase()
     : "";
 
   if (!code || !deviceId) {
@@ -1826,10 +1897,22 @@ app.get("/oauth/callback", async (req, res) => {
       `);
     }
 
-    d.ownerAccessToken = data.access_token;
-    d.ownerRefreshToken = data.refresh_token || null;
-    d.ownerUserId = data.user_id || null;
-    d.ownerLinked = true;
+    let linkedName = "Cuenta dueña";
+    if (participantId) {
+      const participant = d.participantes.find(p => p.id === participantId);
+      if (!participant || participantId === "p1") throw new Error("Participante inválido");
+      participant.accessToken = data.access_token;
+      participant.refreshToken = data.refresh_token || null;
+      participant.userId = data.user_id || null;
+      participant.linked = true;
+      linkedName = participant.nombre || participantId;
+      if (d.participantLinkRequest?.participantId === participantId) d.participantLinkRequest = null;
+    } else {
+      d.ownerAccessToken = data.access_token;
+      d.ownerRefreshToken = data.refresh_token || null;
+      d.ownerUserId = data.user_id || null;
+      d.ownerLinked = true;
+    }
 
     guardarDatos();
 
@@ -1846,7 +1929,7 @@ app.get("/oauth/callback", async (req, res) => {
       <body>
         <div class="box">
           <h1>Cuenta vinculada correctamente</h1>
-          <p>La máquina <b>${escaparHtml(deviceId)}</b> ya puede cobrar con esta cuenta de Mercado Pago.</p>
+          <p><b>${escaparHtml(linkedName)}</b> quedó vinculado al módulo <b>${escaparHtml(deviceId)}</b>.</p>
           <p>Ya podés cerrar esta página.</p>
         </div>
       </body>
@@ -2159,9 +2242,13 @@ app.get("/admin", (req, res) => {
   const participantRows = d.participantes.map((p, index) => `
     <div class="participant-row" data-participant-row="${index + 1}" ${index >= participantCount ? "hidden" : ""}>
       <span class="participant-number">${index + 1}</span>
-      <input name="participant_name_${index + 1}" maxlength="40" placeholder="Nombre del coparticipante" value="${escaparHtml(p.nombre)}">
+      <input name="participant_name_${index + 1}" maxlength="40" placeholder="Nombre del coparticipante" value="${escaparHtml(index === 0 ? "EVETEC" : p.nombre)}" ${index === 0 ? "readonly aria-label=\"EVETEC, participante fijo\"" : ""}>
       <div class="percent-input"><input name="participant_pct_${index + 1}" type="number" min="0" max="100" step="0.01" value="${Number(p.porcentaje)}"><span>%</span></div>
       <b>$${formatoDinero(Number(stats.participantTotals?.[p.id] || 0))}</b>
+      <div class="participant-account">${index === 0
+        ? `<span class="pill ${EVETEC_MP_TOKEN ? "success" : "warning"}">${EVETEC_MP_TOKEN ? "Cuenta base lista" : "Falta credencial"}</span>`
+        : `<span class="pill ${p.linked && p.accessToken ? "success" : "muted"}">${p.linked && p.accessToken ? "Cuenta vinculada" : "Sin vincular"}</span><button class="mini-btn" type="button" data-participant-link="${p.id}">${p.linked && p.accessToken ? "Cambiar QR" : "Generar QR"}</button>${p.linked && p.accessToken ? `<button class="mini-btn danger-mini" type="button" data-participant-unlink="${p.id}">Desvincular</button>` : ""}`}
+      </div>
     </div>
   `).join("");
   const feePayerOptions = [
@@ -2210,11 +2297,11 @@ app.get("/admin", (req, res) => {
       .owner{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}.owner-line{display:flex;justify-content:space-between;gap:12px;margin:8px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800}.success{background:#123d2d;color:#70f0ad}.muted{background:#293746;color:#b9c7d5}.warning{background:#493b18;color:#ffe08a}
       .backup{margin-bottom:16px;border-color:${backupDue ? "var(--yellow)" : "var(--line)"};background:${backupDue ? "linear-gradient(145deg,#352c14,#171b20)" : "linear-gradient(145deg,var(--panel),#0c1826)"}}.backup-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}.backup h2{margin-bottom:7px}.progress{height:10px;border-radius:999px;background:#07111f;overflow:hidden;margin-top:16px}.progress span{display:block;height:100%;width:${backupProgress}%;background:${backupDue ? "var(--yellow)" : "var(--cyan)"};border-radius:inherit}.backup-alert{color:var(--yellow);font-weight:850}
       .test-mode{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:16px;border-color:${d.registroVentasHabilitado !== false ? "#216846" : "var(--yellow)"};background:${d.registroVentasHabilitado !== false ? "linear-gradient(145deg,#102a22,#0c1826)" : "linear-gradient(145deg,#352c14,#171b20)"}}.test-mode h2{margin-bottom:6px}.test-mode form{flex:0 0 auto}.test-mode .btn{min-width:210px}@media(max-width:650px){.test-mode{align-items:stretch;flex-direction:column}.test-mode form,.test-mode .btn{width:100%}}
-      .distribution{margin-bottom:16px}.participant-head,.participant-row{display:grid;grid-template-columns:34px minmax(180px,1fr) 150px 150px;gap:10px;align-items:center}.participant-head{color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:800;padding:0 0 7px}.participant-row{margin:8px 0}.participant-number{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:var(--panel2);color:var(--cyan);font-weight:900}.percent-input{position:relative}.percent-input input{padding-right:32px}.percent-input span{position:absolute;right:12px;top:12px;color:var(--muted)}.distribution-note{border-left:3px solid var(--yellow);padding:10px 13px;margin-top:17px;background:#493b1833;color:#ffe7a7}.form-error{background:#4d1d26;border:1px solid #8f3445;color:#ffc1c8;padding:12px;border-radius:10px;margin-bottom:14px}
+      .distribution{margin-bottom:16px}.participant-head,.participant-row{display:grid;grid-template-columns:34px minmax(150px,1fr) 120px 125px minmax(190px,auto);gap:10px;align-items:center}.participant-head{color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:800;padding:0 0 7px}.participant-row{margin:8px 0}.participant-number{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:var(--panel2);color:var(--cyan);font-weight:900}.percent-input{position:relative}.percent-input input{padding-right:32px}.percent-input span{position:absolute;right:12px;top:12px;color:var(--muted)}.distribution-note{border-left:3px solid var(--yellow);padding:10px 13px;margin-top:17px;background:#493b1833;color:#ffe7a7}.form-error{background:#4d1d26;border:1px solid #8f3445;color:#ffc1c8;padding:12px;border-radius:10px;margin-bottom:14px}.participant-account{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.mini-btn{border:1px solid #34506d;background:#20344a;color:var(--text);padding:7px 9px;border-radius:8px;font-weight:750;cursor:pointer}.danger-mini{background:#421d29;color:#ffb3bc;border-color:#7b3041}
       .device-tabs{display:flex;gap:10px;overflow:auto;margin:0 0 18px;padding:3px}.device-tab{min-width:205px;display:grid;grid-template-columns:10px 1fr;gap:2px 9px;align-items:center;padding:12px 14px;border:1px solid var(--line);border-radius:13px;background:#0b1725;color:var(--text);text-decoration:none}.device-tab.active{border-color:var(--cyan);background:#123047;box-shadow:0 0 0 1px #27d3e244}.device-tab small{grid-column:2;color:var(--muted);font-size:10px}.tab-dot{width:8px;height:8px;border-radius:50%;background:var(--red)}.online-dot{background:var(--green);box-shadow:0 0 9px var(--green)}.participant-picker{display:flex;align-items:center;justify-content:space-between;gap:16px;background:var(--panel2);padding:14px;border-radius:12px;margin:16px 0}.participant-picker select{width:150px}.mp-rate{color:var(--yellow)!important}.country-note{margin-top:16px;padding:14px;border:1px solid #31516c;border-radius:12px;background:#0a2032}.country-note b{color:var(--cyan)}
       details.module-add{margin-top:16px}details.module-add summary{cursor:pointer;font-weight:800;color:var(--cyan)}.new-device-form{display:grid;grid-template-columns:1fr 180px auto;gap:10px;margin-top:16px;align-items:end}
       table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.empty{text-align:center;color:var(--muted);padding:25px}.footer{margin-top:14px;color:var(--muted);font-size:12px}
-      @media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.participant-head{display:none}.participant-row{grid-template-columns:34px 1fr 110px}.participant-row>b{grid-column:2/-1}.new-device-form{grid-template-columns:1fr}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}.participant-row{grid-template-columns:30px 1fr}.percent-input,.participant-row>b{grid-column:2}}
+      @media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.participant-head{display:none}.participant-row{grid-template-columns:34px 1fr 110px}.participant-row>b,.participant-account{grid-column:2/-1}.new-device-form{grid-template-columns:1fr}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}.participant-row{grid-template-columns:30px 1fr}.percent-input,.participant-row>b,.participant-account{grid-column:2}}
     </style>
   </head>
   <body><main>
@@ -2252,8 +2339,8 @@ app.get("/admin", (req, res) => {
       <p class="hint">Los porcentajes se congelan en cada venta. La última columna acumula el neto asignado a cada participante.</p>
       ${distributionError ? `<div class="form-error">${escaparHtml(distributionError)}</div>` : ""}
       <form method="POST" action="/admin/device/${encodeURIComponent(id)}/distribution-update" id="distribution-form">
-        <div class="participant-picker"><div><b>Cantidad de coparticipantes</b><div class="hint">Elegí cuántas personas o empresas participan en este módulo.</div></div><select name="participantCount" id="participant-count">${[1,2,3,4].map(count => `<option value="${count}" ${count === participantCount ? "selected" : ""}>${count} participante${count > 1 ? "s" : ""}</option>`).join("")}</select></div>
-        <div class="participant-head"><span>#</span><span>Nombre</span><span>Participación</span><span>Neto acumulado</span></div>
+        <div class="participant-picker"><div><b>Participantes totales, incluyendo EVETEC</b><div class="hint">EVETEC siempre ocupa el primer lugar. Agregá hasta un dueño y otros dos socios.</div></div><select name="participantCount" id="participant-count">${[1,2,3,4].map(count => `<option value="${count}" ${count === participantCount ? "selected" : ""}>${count} participante${count > 1 ? "s" : ""}</option>`).join("")}</select></div>
+        <div class="participant-head"><span>#</span><span>Alias</span><span>Participación</span><span>Neto acumulado</span><span>Cuenta Mercado Pago</span></div>
         ${participantRows}
         <div class="form-grid" style="margin-top:18px"><div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer" id="mp-fee-payer">${feePayerOptions}</select></div></div>
         <div class="distribution-note">Este reparto es una liquidación contable. Mercado Pago estándar transfiere automáticamente solo entre vendedor y marketplace; los pagos 1:N requieren habilitación comercial especial.</div>
@@ -2291,6 +2378,7 @@ app.get("/admin", (req, res) => {
       <aside class="card">
         <h2>Dueño y Mercado Pago</h2>
         <div class="owner">
+          <div class="owner-line"><span>Cuenta EVETEC base</span><span class="pill ${EVETEC_MP_TOKEN ? "success" : "warning"}">${EVETEC_MP_TOKEN ? "Lista para cobrar" : "Falta credencial"}</span></div>
           <div class="owner-line"><span>Estado</span><span class="pill ${d.ownerLinked ? "success" : "warning"}">${d.ownerLinked ? "Vinculada" : "Sin vincular"}</span></div>
           <div class="owner-line"><span>Usuario MP</span><b>${escaparHtml(d.ownerUserId || "No asignado")}</b></div>
           <div class="owner-line"><span>Correo</span><b>${escaparHtml(d.ownerEmail || "No informado")}</b></div>
@@ -2317,6 +2405,8 @@ app.get("/admin", (req, res) => {
       const feePayer=document.getElementById('mp-fee-payer');
       function syncParticipantRows(){const count=Number(participantCount.value);document.querySelectorAll('[data-participant-row]').forEach(row=>{const number=Number(row.dataset.participantRow);const visible=number<=count;row.hidden=!visible;row.querySelectorAll('input').forEach(input=>input.disabled=!visible);const option=feePayer.querySelector('option[value="p'+number+'"]');const name=row.querySelector('input[name^="participant_name_"]')?.value.trim();if(option){option.hidden=!visible;option.textContent=name||'Coparticipante '+number}});if(feePayer.selectedOptions[0]?.hidden)feePayer.value='proportional'}
       participantCount.addEventListener('change',syncParticipantRows);document.querySelectorAll('input[name^="participant_name_"]').forEach(input=>input.addEventListener('input',syncParticipantRows));syncParticipantRows();
+      document.querySelectorAll('[data-participant-link]').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[data-participant-row]');const alias=row.querySelector('input[name^="participant_name_"]').value.trim();if(!alias){alert('Escribí primero el alias del participante.');return}button.disabled=true;button.textContent='Enviando...';try{const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantLink,alias})});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo generar el QR');button.textContent='QR enviado al módulo';setTimeout(()=>{button.disabled=false;button.textContent='Generar otro QR'},3000)}catch(error){button.disabled=false;button.textContent='Generar QR';alert(error.message)}}));
+      document.querySelectorAll('[data-participant-unlink]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Desvincular esta cuenta de Mercado Pago?'))return;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantUnlink})});if(response.ok)location.reload();else alert('No se pudo desvincular la cuenta.')}));
       setInterval(async()=>{try{const r=await fetch('/admin/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp);document.getElementById('mp-rate').textContent=Number(s.tasaMpEfectiva||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%'}catch(_){ }},5000);
     </script>
   </main></body></html>`);
@@ -2806,15 +2896,70 @@ app.get("/admin/device/:deviceId/live-stats", (req, res) => {
   });
 });
 
+app.get("/participant-status/:deviceId/:participantId", (req, res) => {
+  const d = asegurarDevice(req.params.deviceId);
+  const participantId = String(req.params.participantId || "").toLowerCase();
+  const participant = d.participantes.find(p => p.id === participantId);
+  if (!participant) return res.status(404).json({ ok: false, linked: false });
+  res.json({
+    ok: true,
+    linked: participantId === "p1" ? Boolean(EVETEC_MP_TOKEN) : Boolean(participant.linked && participant.accessToken),
+    participant_id: participantId,
+    alias: participant.nombre || ""
+  });
+});
+
+app.post("/admin/device/:deviceId/participant-link-request", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const participantId = String(req.body.participantId || "").trim().toLowerCase();
+  const participantNumber = Number(participantId.slice(1));
+  const d = asegurarDevice(id);
+  const participant = d.participantes.find(p => p.id === participantId);
+  const alias = String(req.body.alias || participant?.nombre || "").trim().slice(0, 40);
+  if (!participant || participantId === "p1" || !alias || participantNumber < 2 || participantNumber > 4) {
+    return res.status(400).json({ ok: false, error: "Elegí un participante y escribí su alias." });
+  }
+  participant.nombre = alias;
+  d.cantidadParticipantes = Math.max(d.cantidadParticipantes, participantNumber);
+  d.participantLinkRequest = {
+    participantId,
+    alias,
+    requestedAt: new Date().toISOString()
+  };
+  guardarDatos();
+  res.json({ ok: true, participant_id: participantId, alias, message: "QR solicitado al módulo" });
+});
+
+app.post("/admin/device/:deviceId/participant-unlink", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const participantId = String(req.body.participantId || "").trim().toLowerCase();
+  const d = asegurarDevice(id);
+  const participant = d.participantes.find(p => p.id === participantId);
+  if (!participant || participantId === "p1") return res.status(400).json({ ok: false, error: "Participante inválido" });
+  participant.linked = false;
+  participant.accessToken = null;
+  participant.refreshToken = null;
+  participant.userId = null;
+  participant.email = "";
+  if (d.participantLinkRequest?.participantId === participantId) d.participantLinkRequest = null;
+  guardarDatos();
+  res.json({ ok: true });
+});
+
 app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const d = asegurarDevice(id);
   const count = Math.max(1, Math.min(4, Math.round(Number(req.body.participantCount || 1))));
-  const participants = [1, 2, 3, 4].map(index => ({
-    id: `p${index}`,
-    nombre: index <= count ? String(req.body[`participant_name_${index}`] || "").trim().slice(0, 40) : "",
-    porcentaje: index <= count ? Math.max(0, Math.min(100, Number(req.body[`participant_pct_${index}`] || 0))) : 0
-  }));
+  const participants = [1, 2, 3, 4].map(index => {
+    const participantId = `p${index}`;
+    const existing = d.participantes.find(p => p.id === participantId) || {};
+    return {
+      ...existing,
+      id: participantId,
+      nombre: index === 1 ? "EVETEC" : (index <= count ? String(req.body[`participant_name_${index}`] || "").trim().slice(0, 40) : String(existing.nombre || "").slice(0, 40)),
+      porcentaje: index <= count ? Math.max(0, Math.min(100, Number(req.body[`participant_pct_${index}`] || 0))) : 0
+    };
+  });
   const active = participants.slice(0, count).filter(p => p.nombre && p.porcentaje > 0);
   const total = active.reduce((sum, p) => sum + p.porcentaje, 0);
   let error = "";
