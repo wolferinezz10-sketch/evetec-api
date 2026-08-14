@@ -64,6 +64,8 @@ function statsIniciales() {
     pagosAprobados: 0,
     segundosVendidos: 0,
     tiempoMotor: 0,
+    comisionesMp: 0,
+    netoDespuesMp: 0,
     creditosVendidos: 0,
     motorMsVendidos: 0,
     ultimosPagos: []
@@ -104,7 +106,6 @@ let configGlobal = {
     segundos: 240,
     preinicioHabilitado: true,
     preinicioSegundos: 15,
-    pruebaReleSegundos: 3,
     monto: 10,
     montoBase: 10,
     descripcion: "Inflador de autos por 4 minutos"
@@ -157,6 +158,13 @@ function nuevoDevice(tipo = "premium") {
     comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE,
     modoCobro: "owner_commission",
     registroVentasHabilitado: true,
+    participantes: [
+      { id: "p1", nombre: "EVETEC", porcentaje: 100 },
+      { id: "p2", nombre: "", porcentaje: 0 },
+      { id: "p3", nombre: "", porcentaje: 0 },
+      { id: "p4", nombre: "", porcentaje: 0 }
+    ],
+    pagadorComisionMp: "proportional",
 
     stats: statsIniciales()
   };
@@ -264,7 +272,6 @@ function asegurarEstructuraConfig() {
       segundos: 240,
       preinicioHabilitado: true,
       preinicioSegundos: 15,
-      pruebaReleSegundos: 3,
       monto: 10,
       montoBase: 10,
       descripcion: "Inflador de autos por 4 minutos"
@@ -275,9 +282,6 @@ function asegurarEstructuraConfig() {
   }
   if (typeof configGlobal.basic.preinicioHabilitado !== "boolean") {
     configGlobal.basic.preinicioHabilitado = true;
-  }
-  if (!Number.isFinite(Number(configGlobal.basic.pruebaReleSegundos))) {
-    configGlobal.basic.pruebaReleSegundos = 3;
   }
 
   if (!configGlobal.gachapon) {
@@ -429,6 +433,20 @@ function asegurarDevice(deviceId) {
 
   if (!d.modoCobro) d.modoCobro = "owner_commission";
   if (typeof d.registroVentasHabilitado === "undefined") d.registroVentasHabilitado = true;
+  if (!Array.isArray(d.participantes)) d.participantes = [];
+  d.participantes = [0, 1, 2, 3].map(index => {
+    const source = d.participantes[index] || {};
+    return {
+      id: `p${index + 1}`,
+      nombre: String(source.nombre || (index === 0 ? "EVETEC" : "")).slice(0, 40),
+      porcentaje: Math.max(0, Math.min(100, Number(
+        typeof source.porcentaje === "undefined" ? (index === 0 ? 100 : 0) : source.porcentaje
+      )))
+    };
+  });
+  if (!["proportional", "p1", "p2", "p3", "p4"].includes(d.pagadorComisionMp)) {
+    d.pagadorComisionMp = "proportional";
+  }
   if (!Number.isFinite(Number(d.backupConfirmedCount))) d.backupConfirmedCount = 0;
   if (typeof d.backupConfirmedAt === "undefined") d.backupConfirmedAt = null;
   if (!d.stats) d.stats = statsIniciales();
@@ -436,6 +454,41 @@ function asegurarDevice(deviceId) {
   if (d.tipo === "arcade" && typeof d.arcadeCredits === "undefined") d.arcadeCredits = 0;
 
   return d;
+}
+
+function calcularDistribucion(deviceId, monto, comisionMp) {
+  const d = asegurarDevice(deviceId);
+  const participantes = d.participantes.filter(p => p.nombre && Number(p.porcentaje) > 0);
+  const grossCents = Math.max(0, Math.round(Number(monto || 0) * 100));
+  const feeCents = Math.max(0, Math.round(Number(comisionMp || 0) * 100));
+  if (!participantes.length) return [];
+
+  const result = participantes.map(p => ({
+    id: p.id,
+    nombre: p.nombre,
+    porcentaje: Number(p.porcentaje),
+    monto_cents: Math.round(grossCents * Number(p.porcentaje) / 100)
+  }));
+  const grossDifference = grossCents - result.reduce((sum, p) => sum + p.monto_cents, 0);
+  result[result.length - 1].monto_cents += grossDifference;
+
+  if (d.pagadorComisionMp === "proportional") {
+    let assignedFee = 0;
+    result.forEach((p, index) => {
+      const participantFee = index === result.length - 1
+        ? feeCents - assignedFee
+        : Math.round(feeCents * p.porcentaje / 100);
+      p.comision_mp_cents = participantFee;
+      p.neto_cents = p.monto_cents - participantFee;
+      assignedFee += participantFee;
+    });
+  } else {
+    result.forEach(p => {
+      p.comision_mp_cents = p.id === d.pagadorComisionMp ? feeCents : 0;
+      p.neto_cents = p.monto_cents - p.comision_mp_cents;
+    });
+  }
+  return result;
 }
 
 function eventosUsoDevice(deviceId) {
@@ -452,8 +505,15 @@ function statsDesdeUso(deviceId) {
     acc.totalRecaudado += Number(e.amount_cents || 0) / 100;
     acc.segundosVendidos += Number(e.sold_seconds || 0);
     acc.tiempoMotor += Number(e.actual_seconds || 0);
+    acc.comisionesMp += Number(e.mp_fee_cents || 0) / 100;
+    acc.netoDespuesMp += (Number(e.amount_cents || 0) - Number(e.mp_fee_cents || 0)) / 100;
     acc.gananciaEvetec += Number(e.evetec_cents || 0) / 100;
     acc.gananciaDuenio += Number(e.owner_cents || 0) / 100;
+    for (const participant of (Array.isArray(e.participants) ? e.participants : [])) {
+      const id = String(participant.id || "unknown");
+      if (!acc.participantTotals[id]) acc.participantTotals[id] = 0;
+      acc.participantTotals[id] += Number(participant.neto_cents || 0) / 100;
+    }
     if (e.completed === false) acc.interrumpidos += 1;
     return acc;
   }, {
@@ -461,9 +521,12 @@ function statsDesdeUso(deviceId) {
     pagosAprobados: Number(baseline.pagosAprobados || 0) + events.length,
     segundosVendidos: Number(baseline.segundosVendidos || 0),
     tiempoMotor: Number(baseline.tiempoMotor || 0),
+    comisionesMp: 0,
+    netoDespuesMp: 0,
     gananciaEvetec: 0,
     gananciaDuenio: 0,
     interrumpidos: 0,
+    participantTotals: {},
     ultimosPagos: []
   });
   total.ultimosPagos = events.slice(-30).reverse().map(e => ({
@@ -804,12 +867,13 @@ app.get("/config/:deviceId", (req, res) => {
       segundos: Number(configGlobal.basic.segundos),
       preinicio_habilitado: configGlobal.basic.preinicioHabilitado !== false,
       preinicio_segundos: Number(configGlobal.basic.preinicioSegundos || 15),
-      prueba_rele_segundos: Number(configGlobal.basic.pruebaReleSegundos || 3),
       nombre: configGlobal.basic.nombre,
       descripcion: configGlobal.basic.descripcion,
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
       modoCobro: d.modoCobro,
       registro_ventas_habilitado: d.registroVentasHabilitado !== false,
+      participantes: d.participantes,
+      pagador_comision_mp: d.pagadorComisionMp,
       mantenimiento: d.modoMantenimiento,
       serverTime: new Date().toISOString()
     });
@@ -1298,12 +1362,31 @@ async function buscarEstadoMercadoPago(id) {
       const monedaValida = String(pago.currency_id || "") === String(configGlobal.moneda || "ARS");
       const verificado = referenciaValida && montoValido && monedaValida;
       const estadoSeguro = estado === "approved" && !verificado ? "invalid" : estado;
+      const feeDetails = Array.isArray(pago.fee_details) ? pago.fee_details.map(fee => ({
+        type: String(fee.type || "unknown"),
+        amount: Number(fee.amount || 0),
+        fee_payer: String(fee.fee_payer || "collector")
+      })) : [];
+      const marketplaceFeeActual = feeDetails
+        .filter(fee => fee.type === "marketplace_fee" || fee.type === "application_fee")
+        .reduce((sum, fee) => sum + fee.amount, 0);
+      let mpFeeActual = feeDetails
+        .filter(fee => fee.type !== "marketplace_fee" && fee.type !== "application_fee" && fee.fee_payer !== "payer")
+        .reduce((sum, fee) => sum + fee.amount, 0);
+      const netReceivedAmount = Number(pago.transaction_details?.net_received_amount || 0);
+      if (mpFeeActual <= 0 && netReceivedAmount > 0) {
+        mpFeeActual = Math.max(0, Number(pago.transaction_amount || 0) - netReceivedAmount - marketplaceFeeActual);
+      }
 
       if (pagoLocal) {
         pagoLocal.estado = estadoSeguro;
         pagoLocal.payment_id = pago.id;
         pagoLocal.detalle = detalle;
         pagoLocal.verificado = verificado;
+        pagoLocal.comisionMpReal = mpFeeActual;
+        pagoLocal.comisionMarketplaceReal = marketplaceFeeActual;
+        pagoLocal.netoRecibidoMp = netReceivedAmount;
+        pagoLocal.feeDetails = feeDetails;
         pagoLocal.actualizado = new Date().toISOString();
         guardarDatos();
       }
@@ -1317,6 +1400,10 @@ async function buscarEstadoMercadoPago(id) {
         external_reference: pago.external_reference || "",
         moneda: pago.currency_id || "",
         monto_verificado: Number(pago.transaction_amount || 0),
+        comision_mp_real: mpFeeActual,
+        comision_marketplace_real: marketplaceFeeActual,
+        neto_recibido_mp: netReceivedAmount,
+        fee_details: feeDetails,
         segundos: pagoLocal?.segundos || pago.metadata?.segundos || 0,
         motor_ms: pagoLocal?.motor_ms || pago.metadata?.motor_ms || 0,
         creditos: pagoLocal?.creditos || pago.metadata?.creditos || 0,
@@ -1401,6 +1488,8 @@ function registrarPagoVerificado(pagoLocal, paymentId) {
   d.stats.pagosAprobados += 1;
   d.stats.segundosVendidos += segundos;
   d.stats.tiempoMotor += segundos;
+  d.stats.comisionesMp = Number(d.stats.comisionesMp || 0) + Number(pagoLocal.comisionMpReal || 0);
+  d.stats.netoDespuesMp = Number(d.stats.netoDespuesMp || 0) + monto - Number(pagoLocal.comisionMpReal || 0);
   d.stats.creditosVendidos = Number(d.stats.creditosVendidos || 0) + creditos;
   d.stats.motorMsVendidos = Number(d.stats.motorMsVendidos || 0) + motorMs;
   d.stats.ultimosPagos.unshift({
@@ -1453,7 +1542,40 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
     pagoLocal.consumidoAt = new Date().toISOString();
     pagoLocal.consumidoPor = deviceId;
     const registrarVenta = asegurarDevice(deviceId).registroVentasHabilitado !== false;
-    if (registrarVenta) registrarPagoVerificado(pagoLocal, estado.payment_id);
+    const distribucion = calcularDistribucion(deviceId, pagoLocal.monto, estado.comision_mp_real);
+    pagoLocal.distribucion = distribucion;
+    if (registrarVenta) {
+      const d = asegurarDevice(deviceId);
+      if (!d.ledgerBaseline && eventosUsoDevice(deviceId).length === 0) {
+        d.ledgerBaseline = {
+          totalRecaudado: Number(d.stats?.totalRecaudado || 0),
+          pagosAprobados: Number(d.stats?.pagosAprobados || 0),
+          segundosVendidos: Number(d.stats?.segundosVendidos || 0),
+          tiempoMotor: Number(d.stats?.tiempoMotor || 0)
+        };
+      }
+      const eventId = String(estado.payment_id);
+      usageEvents[eventId] = {
+        event_id: eventId,
+        payment_id: eventId,
+        device_id: deviceId,
+        approved_epoch: Math.floor(Date.now() / 1000),
+        started_epoch: 0,
+        finished_epoch: 0,
+        amount_cents: Math.round(Number(pagoLocal.monto || 0) * 100),
+        sold_seconds: Math.max(1, Math.min(3600, Number(pagoLocal.segundos || 0))),
+        actual_seconds: 0,
+        evetec_cents: Math.round(Number(pagoLocal.usandoOwner ? pagoLocal.comisionEvetec || 0 : pagoLocal.monto || 0) * 100),
+        owner_cents: Math.round(Number(pagoLocal.usandoOwner ? pagoLocal.netoDuenioEstimado || 0 : 0) * 100),
+        mp_fee_cents: Math.round(Number(estado.comision_mp_real || 0) * 100),
+        net_received_cents: Math.round(Number(estado.neto_recibido_mp || 0) * 100),
+        participants: distribucion,
+        mode: pagoLocal.modoCobro || "evetec",
+        completed: false,
+        synced_at: new Date().toISOString()
+      };
+      registrarPagoVerificado(pagoLocal, estado.payment_id);
+    }
     else pagoLocal.registroOmitidoPorModoPrueba = true;
     guardarDatos();
 
@@ -1469,7 +1591,10 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
       comision_evetec: Number(pagoLocal.comisionEvetec || 0),
       neto_duenio: Number(pagoLocal.usandoOwner ? pagoLocal.netoDuenioEstimado || 0 : 0),
       ganancia_evetec: Number(pagoLocal.usandoOwner ? pagoLocal.comisionEvetec || 0 : pagoLocal.monto || 0),
-      registrar_venta: registrarVenta
+      registrar_venta: registrarVenta,
+      comision_mp_real: Number(estado.comision_mp_real || 0),
+      neto_recibido_mp: Number(estado.neto_recibido_mp || 0),
+      participantes: distribucion
     });
   } catch (err) {
     console.error("Error /device/claim-payment:", err.message);
@@ -1509,13 +1634,16 @@ app.post("/device/usage-sync", requireDevice, (req, res) => {
   }
 
   let accepted = 0;
+  let updated = 0;
   for (const source of incoming) {
     const eventId = String(source.event_id || source.payment_id || "").trim().slice(0, 120);
-    if (!eventId || usageEvents[eventId]) continue;
+    if (!eventId) continue;
+    const existing = usageEvents[eventId];
+    if (existing && existing.device_id !== deviceId) continue;
     const amountCents = Math.max(0, Math.round(Number(source.amount_cents || 0)));
     const evetecCents = Math.max(0, Math.min(amountCents, Math.round(Number(source.evetec_cents || 0))));
     const ownerCents = Math.max(0, Math.min(amountCents, Math.round(Number(source.owner_cents || 0))));
-    usageEvents[eventId] = {
+    const normalized = {
       event_id: eventId,
       payment_id: String(source.payment_id || eventId).slice(0, 120),
       device_id: deviceId,
@@ -1527,17 +1655,37 @@ app.post("/device/usage-sync", requireDevice, (req, res) => {
       actual_seconds: Math.max(0, Math.min(86400, Math.round(Number(source.actual_seconds || 0)))),
       evetec_cents: evetecCents,
       owner_cents: ownerCents,
+      mp_fee_cents: Math.max(0, Math.round(Number(source.mp_fee_cents || 0))),
+      net_received_cents: Math.round(Number(source.net_received_cents || 0)),
+      participants: (Array.isArray(source.participants) ? source.participants : []).slice(0, 4).map((p, index) => ({
+        id: String(p.id || `p${index + 1}`).slice(0, 10),
+        nombre: String(p.nombre || `Participante ${index + 1}`).slice(0, 40),
+        porcentaje: Math.max(0, Math.min(100, Number(p.porcentaje || 0))),
+        monto_cents: Math.round(Number(p.monto_cents || 0)),
+        comision_mp_cents: Math.max(0, Math.round(Number(p.comision_mp_cents || 0))),
+        neto_cents: Math.round(Number(p.neto_cents || 0))
+      })),
       mode: String(source.mode || "evetec").slice(0, 30),
       completed: source.completed !== false,
       synced_at: new Date().toISOString()
     };
-    accepted += 1;
+    if (existing) {
+      if (!normalized.approved_epoch) normalized.approved_epoch = Number(existing.approved_epoch || 0);
+      if (!normalized.mp_fee_cents && Number(existing.mp_fee_cents || 0) > 0) normalized.mp_fee_cents = existing.mp_fee_cents;
+      if (!normalized.net_received_cents && Number(existing.net_received_cents || 0) > 0) normalized.net_received_cents = existing.net_received_cents;
+      if (!normalized.participants.length && Array.isArray(existing.participants)) normalized.participants = existing.participants;
+      updated += 1;
+    } else {
+      accepted += 1;
+    }
+    usageEvents[eventId] = normalized;
   }
-  if (accepted) guardarDatos();
+  if (accepted || updated) guardarDatos();
   const events = eventosUsoDevice(deviceId);
   res.json({
     ok: true,
     accepted,
+    updated,
     count: events.length,
     latest_event_id: events.length ? events[events.length - 1].event_id : ""
   });
@@ -1960,19 +2108,34 @@ app.get("/admin", (req, res) => {
   const paymentsSinceBackup = Math.max(0, usageList.length - backupConfirmedCount);
   const backupDue = paymentsSinceBackup >= 4000;
   const backupProgress = Math.min(100, (paymentsSinceBackup / 4000) * 100);
+  const distributionError = String(req.query.dist_error || "");
+  const participantRows = d.participantes.map((p, index) => `
+    <div class="participant-row">
+      <span class="participant-number">${index + 1}</span>
+      <input name="participant_name_${index + 1}" maxlength="40" placeholder="Nombre del coparticipante" value="${escaparHtml(p.nombre)}">
+      <div class="percent-input"><input name="participant_pct_${index + 1}" type="number" min="0" max="100" step="0.01" value="${Number(p.porcentaje)}"><span>%</span></div>
+      <b>$${formatoDinero(Number(stats.participantTotals?.[p.id] || 0))}</b>
+    </div>
+  `).join("");
+  const feePayerOptions = [
+    `<option value="proportional" ${d.pagadorComisionMp === "proportional" ? "selected" : ""}>Proporcional entre todos</option>`,
+    ...d.participantes.map((p, index) => `<option value="p${index + 1}" ${d.pagadorComisionMp === `p${index + 1}` ? "selected" : ""}>${escaparHtml(p.nombre || `Coparticipante ${index + 1}`)}</option>`)
+  ].join("");
 
   let pagosHtml = pagos.map(p => `
     <tr>
       <td>${escaparHtml(p.approved_epoch ? new Date(Number(p.approved_epoch) * 1000).toLocaleString("es-AR") : "Sin fecha")}</td>
       <td>${escaparHtml(p.payment_id || p.event_id || "-")}</td>
       <td>$${formatoDinero(Number(p.amount_cents || 0) / 100)}</td>
+      <td>$${formatoDinero(Number(p.mp_fee_cents || 0) / 100)}</td>
+      <td>$${formatoDinero((Number(p.amount_cents || 0) - Number(p.mp_fee_cents || 0)) / 100)}</td>
       <td>${formatoTiempo(p.sold_seconds)}</td>
       <td>${formatoTiempo(p.actual_seconds)}</td>
       <td><span class="pill ${p.completed === false ? "warning" : "success"}">${p.completed === false ? "Interrumpido" : "Completado"}</span></td>
     </tr>
   `).join("");
 
-  if (!pagosHtml) pagosHtml = `<tr><td colspan="6" class="empty">Todavía no hay servicios sincronizados desde este equipo.</td></tr>`;
+  if (!pagosHtml) pagosHtml = `<tr><td colspan="8" class="empty">Todavía no hay servicios sincronizados desde este equipo.</td></tr>`;
 
   res.send(`<!doctype html>
   <html lang="es">
@@ -1986,14 +2149,15 @@ app.get("/admin", (req, res) => {
       main{width:min(1120px,calc(100% - 32px));margin:auto;padding:34px 0 60px}.top{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:24px}
       .brand{font-size:13px;letter-spacing:.22em;color:var(--cyan);font-weight:800}.top h1{margin:7px 0 5px;font-size:clamp(27px,4vw,42px)}.sub,.hint{color:var(--muted)}
       .status{display:flex;align-items:center;gap:9px;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:10px 15px;font-weight:700}.dot{width:9px;height:9px;border-radius:50%;background:${d.online ? "var(--green)" : "var(--red)"};box-shadow:0 0 12px currentColor}
-      .stats,.columns{display:grid;gap:16px}.stats{grid-template-columns:repeat(3,1fr);margin-bottom:16px}.columns{grid-template-columns:1.25fr .75fr}.card{background:linear-gradient(145deg,var(--panel),#0c1826);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 16px 45px #0004}.stat b{display:block;font-size:25px;margin-top:8px}.label{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700}
+      .stats,.columns{display:grid;gap:16px}.stats{grid-template-columns:repeat(4,1fr);margin-bottom:16px}.columns{grid-template-columns:1.25fr .75fr}.card{background:linear-gradient(145deg,var(--panel),#0c1826);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 16px 45px #0004}.stat b{display:block;font-size:25px;margin-top:8px}.label{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700}
       h2{margin:0 0 18px;font-size:20px}h3{margin:25px 0 12px;color:var(--cyan);font-size:14px;text-transform:uppercase;letter-spacing:.08em}.form-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:15px}.field{display:flex;flex-direction:column;gap:7px}.wide{grid-column:1/-1}label{font-weight:650}input,select{width:100%;background:#091522;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:11px 12px;font:inherit;outline:none}input:focus,select:focus{border-color:var(--cyan)}
       .switches{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px}.check{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}.check input{width:auto;margin:0}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:20px}.btn{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:10px;padding:11px 15px;text-decoration:none;font-weight:800;cursor:pointer}.primary{background:var(--cyan);color:#03141a}.secondary{background:#20344a;color:var(--text);border:1px solid #34506d}.danger{background:#421d29;color:#ffb3bc;border:1px solid #7b3041}
       .owner{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}.owner-line{display:flex;justify-content:space-between;gap:12px;margin:8px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800}.success{background:#123d2d;color:#70f0ad}.muted{background:#293746;color:#b9c7d5}.warning{background:#493b18;color:#ffe08a}
       .backup{margin-bottom:16px;border-color:${backupDue ? "var(--yellow)" : "var(--line)"};background:${backupDue ? "linear-gradient(145deg,#352c14,#171b20)" : "linear-gradient(145deg,var(--panel),#0c1826)"}}.backup-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}.backup h2{margin-bottom:7px}.progress{height:10px;border-radius:999px;background:#07111f;overflow:hidden;margin-top:16px}.progress span{display:block;height:100%;width:${backupProgress}%;background:${backupDue ? "var(--yellow)" : "var(--cyan)"};border-radius:inherit}.backup-alert{color:var(--yellow);font-weight:850}
       .test-mode{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:16px;border-color:${d.registroVentasHabilitado !== false ? "#216846" : "var(--yellow)"};background:${d.registroVentasHabilitado !== false ? "linear-gradient(145deg,#102a22,#0c1826)" : "linear-gradient(145deg,#352c14,#171b20)"}}.test-mode h2{margin-bottom:6px}.test-mode form{flex:0 0 auto}.test-mode .btn{min-width:210px}@media(max-width:650px){.test-mode{align-items:stretch;flex-direction:column}.test-mode form,.test-mode .btn{width:100%}}
+      .distribution{margin-bottom:16px}.participant-head,.participant-row{display:grid;grid-template-columns:34px minmax(180px,1fr) 150px 150px;gap:10px;align-items:center}.participant-head{color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:800;padding:0 0 7px}.participant-row{margin:8px 0}.participant-number{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:var(--panel2);color:var(--cyan);font-weight:900}.percent-input{position:relative}.percent-input input{padding-right:32px}.percent-input span{position:absolute;right:12px;top:12px;color:var(--muted)}.distribution-note{border-left:3px solid var(--yellow);padding:10px 13px;margin-top:17px;background:#493b1833;color:#ffe7a7}.form-error{background:#4d1d26;border:1px solid #8f3445;color:#ffc1c8;padding:12px;border-radius:10px;margin-bottom:14px}
       table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.empty{text-align:center;color:var(--muted);padding:25px}.footer{margin-top:14px;color:var(--muted);font-size:12px}
-      @media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}}
+      @media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.participant-head{display:none}.participant-row{grid-template-columns:34px 1fr 110px}.participant-row>b{grid-column:2/-1}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}.participant-row{grid-template-columns:30px 1fr}.percent-input,.participant-row>b{grid-column:2}}
     </style>
   </head>
   <body><main>
@@ -2020,6 +2184,21 @@ app.get("/admin", (req, res) => {
       <div class="card stat"><span class="label">Uso real</span><b>${formatoTiempo(stats.tiempoMotor)}</b></div>
       <div class="card stat"><span class="label">Ganancia EVETEC</span><b>$${formatoDinero(stats.gananciaEvetec)}</b></div>
       <div class="card stat"><span class="label">Ganancia dueño</span><b>$${formatoDinero(stats.gananciaDuenio)}</b></div>
+      <div class="card stat"><span class="label">Comisión MP real</span><b id="mp-fees">$${formatoDinero(stats.comisionesMp)}</b></div>
+      <div class="card stat"><span class="label">Neto tras MP</span><b id="net-after-mp">$${formatoDinero(stats.netoDespuesMp)}</b></div>
+    </section>
+
+    <section class="card distribution">
+      <h2>Reparto entre coparticipantes</h2>
+      <p class="hint">Los porcentajes se congelan en cada venta. La última columna acumula el neto asignado a cada participante.</p>
+      ${distributionError ? `<div class="form-error">${escaparHtml(distributionError)}</div>` : ""}
+      <form method="POST" action="/admin/prototype/distribution-update">
+        <div class="participant-head"><span>#</span><span>Nombre</span><span>Participación</span><span>Neto acumulado</span></div>
+        ${participantRows}
+        <div class="form-grid" style="margin-top:18px"><div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer">${feePayerOptions}</select></div></div>
+        <div class="distribution-note">Este reparto es una liquidación contable. Mercado Pago estándar transfiere automáticamente solo entre vendedor y marketplace; los pagos 1:N requieren habilitación comercial especial.</div>
+        <div class="actions"><button class="btn primary" type="submit">Guardar reparto</button></div>
+      </form>
     </section>
 
     <section class="columns">
@@ -2037,7 +2216,6 @@ app.get("/admin", (req, res) => {
             <div class="field"><label>Duración: minutos</label><input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos) / 60)}" required></div>
             <div class="field"><label>Duración: segundos</label><input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos) % 60}" required></div>
             <div class="field"><label>Espera antes de encender (segundos)</label><input name="preinicioSegundos" type="number" min="0" max="120" value="${Number(cfg.preinicioSegundos)}" required></div>
-            <div class="field"><label>Prueba de relé (segundos)</label><input name="pruebaReleSegundos" type="number" min="1" max="10" value="${Number(cfg.pruebaReleSegundos)}" required></div>
             <div class="field"><label>Tipo de cobro</label><select name="modoCobro">
               <option value="owner_commission" ${d.modoCobro === "owner_commission" ? "selected" : ""}>Cuenta del dueño + comisión EVETEC</option>
               <option value="owner_direct" ${d.modoCobro === "owner_direct" ? "selected" : ""}>100% directo al dueño</option>
@@ -2069,8 +2247,9 @@ app.get("/admin", (req, res) => {
       </aside>
     </section>
 
-    <section class="card" style="margin-top:16px"><h2>Servicios confirmados por el equipo</h2><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Pago</th><th>Monto</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
+    <section class="card" style="margin-top:16px"><h2>Servicios confirmados por el equipo</h2><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Pago</th><th>Monto</th><th>Comisión MP</th><th>Neto MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
     <div class="footer">Los cambios de precio y tiempos son consultados automáticamente por la pantalla. Base: ${escaparHtml(PUBLIC_BASE_URL)}</div>
+    <script>setInterval(async()=>{try{const r=await fetch('/admin/prototype/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp)}catch(_){ }},5000);</script>
   </main></body></html>`);
 });
 
@@ -2182,8 +2361,6 @@ function renderLegacyAdminDisabled(req, res) {
           <input name="segundos" value="${configGlobal.basic.segundos}" size="8"><br>
           Espera antes de encender:
           <input name="preinicioSegundos" value="${configGlobal.basic.preinicioSegundos}" size="8"> segundos
-          Prueba de relé:
-          <input name="pruebaReleSegundos" value="${configGlobal.basic.pruebaReleSegundos}" size="8"> segundos<br>
           Descripción:
           <input name="descripcion" value="${escaparHtml(configGlobal.basic.descripcion)}" size="42"><br>
           <button class="save" type="submit">Guardar básico</button>
@@ -2484,7 +2661,10 @@ app.get("/admin/prototype/usage-backup.csv", (req, res) => {
   const events = eventosUsoDevice(PROTOTYPE_DEVICE_ID);
   const columns = [
     "event_id", "payment_id", "device_id", "approved_at", "started_at", "finished_at",
-    "amount_ars", "sold_seconds", "actual_seconds", "evetec_ars", "owner_ars", "mode", "completed"
+    "amount_ars", "mp_fee_ars", "net_after_mp_ars", "sold_seconds", "actual_seconds",
+    "evetec_ars", "owner_ars", "participant_1", "participant_1_net", "participant_2",
+    "participant_2_net", "participant_3", "participant_3_net", "participant_4",
+    "participant_4_net", "mode", "completed"
   ];
   const rows = events.map(e => [
     e.event_id, e.payment_id, e.device_id,
@@ -2492,9 +2672,15 @@ app.get("/admin/prototype/usage-backup.csv", (req, res) => {
     e.started_epoch ? new Date(Number(e.started_epoch) * 1000).toISOString() : "",
     e.finished_epoch ? new Date(Number(e.finished_epoch) * 1000).toISOString() : "",
     (Number(e.amount_cents || 0) / 100).toFixed(2),
+    (Number(e.mp_fee_cents || 0) / 100).toFixed(2),
+    ((Number(e.amount_cents || 0) - Number(e.mp_fee_cents || 0)) / 100).toFixed(2),
     Number(e.sold_seconds || 0), Number(e.actual_seconds || 0),
     (Number(e.evetec_cents || 0) / 100).toFixed(2),
     (Number(e.owner_cents || 0) / 100).toFixed(2),
+    ...[0, 1, 2, 3].flatMap(index => {
+      const p = (e.participants || [])[index] || {};
+      return [p.nombre || "", (Number(p.neto_cents || 0) / 100).toFixed(2)];
+    }),
     e.mode || "", e.completed !== false ? "yes" : "no"
   ]);
   const csv = "\uFEFF" + [columns, ...rows].map(row => row.map(celdaCsv).join(",")).join("\r\n");
@@ -2519,6 +2705,45 @@ app.post("/admin/prototype/toggle-sales-log", (req, res) => {
   res.redirect("/admin");
 });
 
+app.get("/admin/prototype/live-stats", (req, res) => {
+  const usageList = eventosUsoDevice(PROTOTYPE_DEVICE_ID);
+  const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
+  const stats = usageList.length ? statsDesdeUso(PROTOTYPE_DEVICE_ID) : (d.stats || statsIniciales());
+  res.set("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    comisionesMp: Number(stats.comisionesMp || 0),
+    netoDespuesMp: Number(stats.netoDespuesMp || 0),
+    pagosAprobados: Number(stats.pagosAprobados || 0),
+    participantTotals: stats.participantTotals || {}
+  });
+});
+
+app.post("/admin/prototype/distribution-update", (req, res) => {
+  const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
+  const participants = [1, 2, 3, 4].map(index => ({
+    id: `p${index}`,
+    nombre: String(req.body[`participant_name_${index}`] || "").trim().slice(0, 40),
+    porcentaje: Math.max(0, Math.min(100, Number(req.body[`participant_pct_${index}`] || 0)))
+  }));
+  const active = participants.filter(p => p.nombre && p.porcentaje > 0);
+  const total = active.reduce((sum, p) => sum + p.porcentaje, 0);
+  if (!active.length || Math.abs(total - 100) > 0.001) {
+    return res.redirect(`/admin?dist_error=${encodeURIComponent("Los participantes activos deben sumar exactamente 100%.")}`);
+  }
+  if (participants.some(p => (!p.nombre && p.porcentaje > 0) || (p.nombre && p.porcentaje <= 0))) {
+    return res.redirect(`/admin?dist_error=${encodeURIComponent("Cada participante debe tener nombre y un porcentaje mayor a cero.")}`);
+  }
+  const feePayer = String(req.body.mpFeePayer || "proportional");
+  if (feePayer !== "proportional" && !active.some(p => p.id === feePayer)) {
+    return res.redirect(`/admin?dist_error=${encodeURIComponent("El responsable de la comisión debe ser un participante activo.")}`);
+  }
+  d.participantes = participants;
+  d.pagadorComisionMp = feePayer;
+  guardarDatos();
+  res.redirect("/admin");
+});
+
 app.post("/admin/prototype/update", (req, res) => {
   const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
   const cfg = configGlobal.basic;
@@ -2529,7 +2754,6 @@ app.post("/admin/prototype/update", (req, res) => {
   const segundosServicio = Number(req.body.segundosServicio);
   const segundosAnteriores = Number(req.body.segundos);
   const preinicio = Number(req.body.preinicioSegundos);
-  const prueba = Number(req.body.pruebaReleSegundos);
   const comision = Number(req.body.comision);
 
   configGlobal.activo = activo;
@@ -2551,7 +2775,6 @@ app.post("/admin/prototype/update", (req, res) => {
     cfg.segundos = Math.max(1, Math.min(3600, Math.round(segundosAnteriores)));
   }
   if (Number.isFinite(preinicio)) cfg.preinicioSegundos = Math.max(0, Math.min(120, Math.round(preinicio)));
-  if (Number.isFinite(prueba)) cfg.pruebaReleSegundos = Math.max(1, Math.min(10, Math.round(prueba)));
   if (Number.isFinite(comision)) d.comisionEvetecPorcentaje = Math.max(0, Math.min(100, comision));
 
   d.modoCobro = ["owner_commission", "owner_direct", "evetec"].includes(modo)
@@ -2576,7 +2799,6 @@ app.post("/admin/basic/update", (req, res) => {
   configGlobal.basic.monto = Number(req.body.monto) || configGlobal.basic.monto;
   configGlobal.basic.segundos = Math.max(1, Math.min(3600, Number(req.body.segundos) || configGlobal.basic.segundos));
   configGlobal.basic.preinicioSegundos = Math.max(0, Math.min(120, Number(req.body.preinicioSegundos) || 0));
-  configGlobal.basic.pruebaReleSegundos = Math.max(1, Math.min(10, Number(req.body.pruebaReleSegundos) || 3));
   configGlobal.basic.descripcion = req.body.descripcion || configGlobal.basic.descripcion;
   configGlobal.basic.montoBase = configGlobal.basic.montoBase || configGlobal.basic.monto;
   guardarDatos();
