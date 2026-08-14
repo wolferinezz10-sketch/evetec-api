@@ -434,13 +434,18 @@ function asegurarDevice(deviceId) {
   if (!d.modoCobro) d.modoCobro = "owner_commission";
   if (typeof d.registroVentasHabilitado === "undefined") d.registroVentasHabilitado = true;
   if (!Array.isArray(d.participantes)) d.participantes = [];
+  const participantesSinConfigurar = d.participantes.length === 0;
   d.participantes = [0, 1, 2, 3].map(index => {
     const source = d.participantes[index] || {};
     return {
       id: `p${index + 1}`,
-      nombre: String(source.nombre || (index === 0 ? "EVETEC" : "")).slice(0, 40),
+      nombre: String(typeof source.nombre === "undefined"
+        ? (participantesSinConfigurar && index === 0 ? "EVETEC" : "")
+        : source.nombre).slice(0, 40),
       porcentaje: Math.max(0, Math.min(100, Number(
-        typeof source.porcentaje === "undefined" ? (index === 0 ? 100 : 0) : source.porcentaje
+        typeof source.porcentaje === "undefined"
+          ? (participantesSinConfigurar && index === 0 ? 100 : 0)
+          : source.porcentaje
       )))
     };
   });
