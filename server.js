@@ -164,7 +164,10 @@ function nuevoDevice(tipo = "premium") {
       { id: "p3", nombre: "", porcentaje: 0 },
       { id: "p4", nombre: "", porcentaje: 0 }
     ],
+    cantidadParticipantes: 1,
     pagadorComisionMp: "proportional",
+    configuracionServicio: null,
+    paisOperacion: "AR",
 
     stats: statsIniciales()
   };
@@ -449,16 +452,34 @@ function asegurarDevice(deviceId) {
       )))
     };
   });
+  const participantesActivos = d.participantes.filter(p => p.nombre && Number(p.porcentaje) > 0).length;
+  d.cantidadParticipantes = Math.max(1, Math.min(4, Number(d.cantidadParticipantes || participantesActivos || 1)));
   if (!["proportional", "p1", "p2", "p3", "p4"].includes(d.pagadorComisionMp)) {
     d.pagadorComisionMp = "proportional";
   }
   if (!Number.isFinite(Number(d.backupConfirmedCount))) d.backupConfirmedCount = 0;
   if (typeof d.backupConfirmedAt === "undefined") d.backupConfirmedAt = null;
+  if (!d.configuracionServicio || typeof d.configuracionServicio !== "object") {
+    d.configuracionServicio = { ...configGlobal.basic };
+  }
+  d.configuracionServicio = {
+    ...configGlobal.basic,
+    ...d.configuracionServicio
+  };
+  if (!['AR', 'BR'].includes(d.paisOperacion)) d.paisOperacion = 'AR';
   if (!d.stats) d.stats = statsIniciales();
   if (!Array.isArray(d.stats.ultimosPagos)) d.stats.ultimosPagos = [];
   if (d.tipo === "arcade" && typeof d.arcadeCredits === "undefined") d.arcadeCredits = 0;
 
   return d;
+}
+
+function configuracionServicioDevice(deviceId) {
+  return asegurarDevice(deviceId).configuracionServicio;
+}
+
+function monedaDevice(deviceId) {
+  return asegurarDevice(deviceId).paisOperacion === "BR" ? "BRL" : "ARS";
 }
 
 function calcularDistribucion(deviceId, monto, comisionMp) {
@@ -779,14 +800,15 @@ function normalizarPedidoPago(body) {
   }
 
   if (d.tipo === "basic") {
+    const cfg = configuracionServicioDevice(device_id);
     return {
       device_id,
       modoSistema: "basic",
       plan_id: "BASIC",
-      plan_nombre: configGlobal.basic.nombre || "Uso básico",
+      plan_nombre: cfg.nombre || "Uso básico",
       origen: "basic",
-      monto: Number(configGlobal.basic.monto),
-      segundos: Number(configGlobal.basic.segundos)
+      monto: Number(cfg.monto),
+      segundos: Number(cfg.segundos)
     };
   }
 
@@ -861,24 +883,26 @@ app.get("/config/:deviceId", (req, res) => {
   }
 
   if (d.tipo === "basic") {
+    const cfg = configuracionServicioDevice(deviceId);
     return res.json({
       ok: true,
       tipo: "basic",
       activo: operativo.ok,
       motivo: operativo.motivo,
       mensaje: operativo.ok ? configGlobal.mensajeGlobal : operativo.mensaje,
-      precio: Number(configGlobal.basic.monto),
-      monto: Number(configGlobal.basic.monto),
-      segundos: Number(configGlobal.basic.segundos),
-      preinicio_habilitado: configGlobal.basic.preinicioHabilitado !== false,
-      preinicio_segundos: Number(configGlobal.basic.preinicioSegundos || 15),
-      nombre: configGlobal.basic.nombre,
-      descripcion: configGlobal.basic.descripcion,
+      precio: Number(cfg.monto),
+      monto: Number(cfg.monto),
+      segundos: Number(cfg.segundos),
+      preinicio_habilitado: cfg.preinicioHabilitado !== false,
+      preinicio_segundos: Number(cfg.preinicioSegundos || 15),
+      nombre: cfg.nombre,
+      descripcion: cfg.descripcion,
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
       modoCobro: d.modoCobro,
       registro_ventas_habilitado: d.registroVentasHabilitado !== false,
       participantes: d.participantes,
       pagador_comision_mp: d.pagadorComisionMp,
+      cantidad_participantes: d.cantidadParticipantes,
       mantenimiento: d.modoMantenimiento,
       serverTime: new Date().toISOString()
     });
@@ -1035,13 +1059,14 @@ async function crearPagoMercadoPago(pedido) {
   const external_reference = `${pedido.device_id}_${pedido.modoSistema}_${Date.now()}`;
   const comision = calcularComision(pedido.device_id, pedido.monto, usandoOwner);
   const netoDuenioEstimado = Math.max(0, Number(pedido.monto) - comision);
+  const moneda = monedaDevice(pedido.device_id);
 
   const body = {
     items: [
       {
         title: `${pedido.plan_nombre} - ${pedido.device_id}`,
         quantity: 1,
-        currency_id: configGlobal.moneda || "ARS",
+        currency_id: moneda,
         unit_price: Number(pedido.monto)
       }
     ],
@@ -1107,6 +1132,7 @@ async function crearPagoMercadoPago(pedido) {
     comisionEvetec: comision,
     netoDuenioEstimado,
     modoCobro: d.modoCobro,
+    moneda,
     usandoOwner,
     estado: "pending",
     link,
@@ -1364,7 +1390,7 @@ async function buscarEstadoMercadoPago(id) {
       const montoEsperado = Number(pagoLocal?.monto || 0);
       const montoValido = montoEsperado > 0 &&
         Math.abs(Number(pago.transaction_amount || 0) - montoEsperado) < 0.001;
-      const monedaValida = String(pago.currency_id || "") === String(configGlobal.moneda || "ARS");
+      const monedaValida = String(pago.currency_id || "") === String(pagoLocal?.moneda || (deviceId ? monedaDevice(deviceId) : "ARS"));
       const verificado = referenciaValida && montoValido && monedaValida;
       const estadoSeguro = estado === "approved" && !verificado ? "invalid" : estado;
       const feeDetails = Array.isArray(pago.fee_details) ? pago.fee_details.map(fee => ({
@@ -1836,7 +1862,7 @@ app.post("/unlink-owner/:deviceId", requireAdmin, (req, res) => {
 
   guardarDatos();
 
-  res.redirect("/admin");
+  res.redirect(`/admin?device=${encodeURIComponent(String(req.params.deviceId || "").toUpperCase())}`);
 });
 
 app.get("/owner-status/:deviceId", (req, res) => {
@@ -2099,9 +2125,11 @@ app.get("/", (req, res) => {
 });
 
 app.get("/admin", (req, res) => {
-  const id = PROTOTYPE_DEVICE_ID;
+  const requestedId = String(req.query.device || "").trim().toUpperCase();
+  const deviceIds = Object.keys(devices).sort();
+  const id = requestedId && devices[requestedId] ? requestedId : (devices[PROTOTYPE_DEVICE_ID] ? PROTOTYPE_DEVICE_ID : deviceIds[0]);
   const d = asegurarDevice(id);
-  const cfg = configGlobal.basic;
+  const cfg = configuracionServicioDevice(id);
   const usageList = eventosUsoDevice(id);
   const stats = usageList.length ? statsDesdeUso(id) : (d.stats || statsIniciales());
   const ultimoPago = stats.ultimosPagos?.[0] || null;
@@ -2114,8 +2142,9 @@ app.get("/admin", (req, res) => {
   const backupDue = paymentsSinceBackup >= 4000;
   const backupProgress = Math.min(100, (paymentsSinceBackup / 4000) * 100);
   const distributionError = String(req.query.dist_error || "");
+  const participantCount = Math.max(1, Math.min(4, Number(d.cantidadParticipantes || 1)));
   const participantRows = d.participantes.map((p, index) => `
-    <div class="participant-row">
+    <div class="participant-row" data-participant-row="${index + 1}" ${index >= participantCount ? "hidden" : ""}>
       <span class="participant-number">${index + 1}</span>
       <input name="participant_name_${index + 1}" maxlength="40" placeholder="Nombre del coparticipante" value="${escaparHtml(p.nombre)}">
       <div class="percent-input"><input name="participant_pct_${index + 1}" type="number" min="0" max="100" step="0.01" value="${Number(p.porcentaje)}"><span>%</span></div>
@@ -2124,8 +2153,15 @@ app.get("/admin", (req, res) => {
   `).join("");
   const feePayerOptions = [
     `<option value="proportional" ${d.pagadorComisionMp === "proportional" ? "selected" : ""}>Proporcional entre todos</option>`,
-    ...d.participantes.map((p, index) => `<option value="p${index + 1}" ${d.pagadorComisionMp === `p${index + 1}` ? "selected" : ""}>${escaparHtml(p.nombre || `Coparticipante ${index + 1}`)}</option>`)
+    ...d.participantes.map((p, index) => `<option value="p${index + 1}" ${index >= participantCount ? "hidden" : ""} ${d.pagadorComisionMp === `p${index + 1}` ? "selected" : ""}>${escaparHtml(p.nombre || `Coparticipante ${index + 1}`)}</option>`)
   ].join("");
+  const mpEffectiveRate = Number(stats.totalRecaudado || 0) > 0
+    ? Number(stats.comisionesMp || 0) * 100 / Number(stats.totalRecaudado || 0)
+    : 0;
+  const deviceTabs = deviceIds.map(deviceId => {
+    const tabDevice = asegurarDevice(deviceId);
+    return `<a class="device-tab ${deviceId === id ? "active" : ""}" href="/admin?device=${encodeURIComponent(deviceId)}"><span class="tab-dot ${tabDevice.online ? "online-dot" : ""}"></span><span>${escaparHtml(tabDevice.configuracionServicio?.nombre || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`;
+  }).join("");
 
   let pagosHtml = pagos.map(p => `
     <tr>
@@ -2133,6 +2169,7 @@ app.get("/admin", (req, res) => {
       <td>${escaparHtml(p.payment_id || p.event_id || "-")}</td>
       <td>$${formatoDinero(Number(p.amount_cents || 0) / 100)}</td>
       <td>$${formatoDinero(Number(p.mp_fee_cents || 0) / 100)}</td>
+      <td>${Number(p.amount_cents || 0) > 0 ? (Number(p.mp_fee_cents || 0) * 100 / Number(p.amount_cents)).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "0,00"}%</td>
       <td>$${formatoDinero((Number(p.amount_cents || 0) - Number(p.mp_fee_cents || 0)) / 100)}</td>
       <td>${formatoTiempo(p.sold_seconds)}</td>
       <td>${formatoTiempo(p.actual_seconds)}</td>
@@ -2140,17 +2177,17 @@ app.get("/admin", (req, res) => {
     </tr>
   `).join("");
 
-  if (!pagosHtml) pagosHtml = `<tr><td colspan="8" class="empty">Todavía no hay servicios sincronizados desde este equipo.</td></tr>`;
+  if (!pagosHtml) pagosHtml = `<tr><td colspan="9" class="empty">Todavía no hay servicios sincronizados desde este equipo.</td></tr>`;
 
   res.send(`<!doctype html>
   <html lang="es">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>EVETEC | Aspiradora QR</title>
+    <title>EVETEC | Gestión de módulos</title>
     <style>
       :root{color-scheme:dark;--bg:#07111f;--panel:#101d2d;--panel2:#142438;--line:#263a50;--text:#f4f8fb;--muted:#91a4b7;--cyan:#27d3e2;--green:#38d987;--red:#ff6474;--yellow:#ffc857}
-      *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#12324a 0,transparent 34%),var(--bg);color:var(--text);font:15px Inter,Segoe UI,Arial,sans-serif}
+      *{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:radial-gradient(circle at 80% 0,#12324a 0,transparent 34%),var(--bg);color:var(--text);font:15px Inter,Segoe UI,Arial,sans-serif}
       main{width:min(1120px,calc(100% - 32px));margin:auto;padding:34px 0 60px}.top{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:24px}
       .brand{font-size:13px;letter-spacing:.22em;color:var(--cyan);font-weight:800}.top h1{margin:7px 0 5px;font-size:clamp(27px,4vw,42px)}.sub,.hint{color:var(--muted)}
       .status{display:flex;align-items:center;gap:9px;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:10px 15px;font-weight:700}.dot{width:9px;height:9px;border-radius:50%;background:${d.online ? "var(--green)" : "var(--red)"};box-shadow:0 0 12px currentColor}
@@ -2161,25 +2198,28 @@ app.get("/admin", (req, res) => {
       .backup{margin-bottom:16px;border-color:${backupDue ? "var(--yellow)" : "var(--line)"};background:${backupDue ? "linear-gradient(145deg,#352c14,#171b20)" : "linear-gradient(145deg,var(--panel),#0c1826)"}}.backup-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}.backup h2{margin-bottom:7px}.progress{height:10px;border-radius:999px;background:#07111f;overflow:hidden;margin-top:16px}.progress span{display:block;height:100%;width:${backupProgress}%;background:${backupDue ? "var(--yellow)" : "var(--cyan)"};border-radius:inherit}.backup-alert{color:var(--yellow);font-weight:850}
       .test-mode{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:16px;border-color:${d.registroVentasHabilitado !== false ? "#216846" : "var(--yellow)"};background:${d.registroVentasHabilitado !== false ? "linear-gradient(145deg,#102a22,#0c1826)" : "linear-gradient(145deg,#352c14,#171b20)"}}.test-mode h2{margin-bottom:6px}.test-mode form{flex:0 0 auto}.test-mode .btn{min-width:210px}@media(max-width:650px){.test-mode{align-items:stretch;flex-direction:column}.test-mode form,.test-mode .btn{width:100%}}
       .distribution{margin-bottom:16px}.participant-head,.participant-row{display:grid;grid-template-columns:34px minmax(180px,1fr) 150px 150px;gap:10px;align-items:center}.participant-head{color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:800;padding:0 0 7px}.participant-row{margin:8px 0}.participant-number{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:var(--panel2);color:var(--cyan);font-weight:900}.percent-input{position:relative}.percent-input input{padding-right:32px}.percent-input span{position:absolute;right:12px;top:12px;color:var(--muted)}.distribution-note{border-left:3px solid var(--yellow);padding:10px 13px;margin-top:17px;background:#493b1833;color:#ffe7a7}.form-error{background:#4d1d26;border:1px solid #8f3445;color:#ffc1c8;padding:12px;border-radius:10px;margin-bottom:14px}
+      .device-tabs{display:flex;gap:10px;overflow:auto;margin:0 0 18px;padding:3px}.device-tab{min-width:205px;display:grid;grid-template-columns:10px 1fr;gap:2px 9px;align-items:center;padding:12px 14px;border:1px solid var(--line);border-radius:13px;background:#0b1725;color:var(--text);text-decoration:none}.device-tab.active{border-color:var(--cyan);background:#123047;box-shadow:0 0 0 1px #27d3e244}.device-tab small{grid-column:2;color:var(--muted);font-size:10px}.tab-dot{width:8px;height:8px;border-radius:50%;background:var(--red)}.online-dot{background:var(--green);box-shadow:0 0 9px var(--green)}.participant-picker{display:flex;align-items:center;justify-content:space-between;gap:16px;background:var(--panel2);padding:14px;border-radius:12px;margin:16px 0}.participant-picker select{width:150px}.mp-rate{color:var(--yellow)!important}.country-note{margin-top:16px;padding:14px;border:1px solid #31516c;border-radius:12px;background:#0a2032}.country-note b{color:var(--cyan)}
+      details.module-add{margin-top:16px}details.module-add summary{cursor:pointer;font-weight:800;color:var(--cyan)}.new-device-form{display:grid;grid-template-columns:1fr 180px auto;gap:10px;margin-top:16px;align-items:end}
       table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.empty{text-align:center;color:var(--muted);padding:25px}.footer{margin-top:14px;color:var(--muted);font-size:12px}
-      @media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.participant-head{display:none}.participant-row{grid-template-columns:34px 1fr 110px}.participant-row>b{grid-column:2/-1}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}.participant-row{grid-template-columns:30px 1fr}.percent-input,.participant-row>b{grid-column:2}}
+      @media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.participant-head{display:none}.participant-row{grid-template-columns:34px 1fr 110px}.participant-row>b{grid-column:2/-1}.new-device-form{grid-template-columns:1fr}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}.participant-row{grid-template-columns:30px 1fr}.percent-input,.participant-row>b{grid-column:2}}
     </style>
   </head>
   <body><main>
+    <nav class="device-tabs" aria-label="Módulos">${deviceTabs}</nav>
     <header class="top">
-      <div><div class="brand">EVETEC AUTOMOTIVE</div><h1>Aspiradora QR</h1><div class="sub">Administración exclusiva del prototipo <b>${id}</b></div></div>
+      <div><div class="brand">EVETEC AUTOMOTIVE</div><h1>${escaparHtml(cfg.nombre || "Equipo QR")}</h1><div class="sub">Panel independiente del módulo <b>${id}</b></div></div>
       <div class="status"><span class="dot"></span>${d.online ? "Equipo online" : "Equipo offline"}</div>
     </header>
 
     <section class="card test-mode">
       <div><h2>${d.registroVentasHabilitado !== false ? "Registro de ventas activo" : "Modo prueba activo"}</h2><div class="${d.registroVentasHabilitado !== false ? "hint" : "backup-alert"}">${d.registroVentasHabilitado !== false ? "Los próximos pagos aprobados sumarán ganancias, usos y respaldo." : "Los próximos cobros accionarán el equipo, pero no se guardarán como ventas ni usos reales."}</div></div>
-      <form method="POST" action="/admin/prototype/toggle-sales-log"><button class="btn ${d.registroVentasHabilitado !== false ? "danger" : "primary"}" type="submit">${d.registroVentasHabilitado !== false ? "Activar modo prueba" : "Reactivar ventas reales"}</button></form>
+      <form method="POST" action="/admin/device/${encodeURIComponent(id)}/toggle-sales-log"><button class="btn ${d.registroVentasHabilitado !== false ? "danger" : "primary"}" type="submit">${d.registroVentasHabilitado !== false ? "Activar modo prueba" : "Reactivar ventas reales"}</button></form>
     </section>
 
     <section class="card backup">
       <div class="backup-head"><div><h2>${backupDue ? "Respaldo externo requerido" : "Respaldo local del equipo"}</h2><div class="${backupDue ? "backup-alert" : "hint"}">${backupDue ? `Ya se acumularon ${paymentsSinceBackup} pagos desde el ultimo respaldo. Descarga el CSV y confirmalo.` : `${paymentsSinceBackup} de 4.000 pagos para el proximo aviso de respaldo.`}</div></div><span class="pill ${backupDue ? "warning" : "success"}">${usageList.length} guardados</span></div>
       <div class="progress"><span></span></div>
-      <div class="actions"><a class="btn secondary" href="/admin/prototype/usage-backup.csv">Descargar respaldo CSV</a>${backupDue ? `<form method="POST" action="/admin/prototype/backup-confirm"><button class="btn primary" type="submit">Marcar respaldo realizado</button></form>` : ""}</div>
+      <div class="actions"><a class="btn secondary" href="/admin/device/${encodeURIComponent(id)}/usage-backup.csv">Descargar respaldo CSV</a>${backupDue ? `<form method="POST" action="/admin/device/${encodeURIComponent(id)}/backup-confirm"><button class="btn primary" type="submit">Marcar respaldo realizado</button></form>` : ""}</div>
     </section>
 
     <section class="stats">
@@ -2190,6 +2230,7 @@ app.get("/admin", (req, res) => {
       <div class="card stat"><span class="label">Ganancia EVETEC</span><b>$${formatoDinero(stats.gananciaEvetec)}</b></div>
       <div class="card stat"><span class="label">Ganancia dueño</span><b>$${formatoDinero(stats.gananciaDuenio)}</b></div>
       <div class="card stat"><span class="label">Comisión MP real</span><b id="mp-fees">$${formatoDinero(stats.comisionesMp)}</b></div>
+      <div class="card stat"><span class="label">Tasa efectiva MP</span><b class="mp-rate" id="mp-rate">${mpEffectiveRate.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%</b></div>
       <div class="card stat"><span class="label">Neto tras MP</span><b id="net-after-mp">$${formatoDinero(stats.netoDespuesMp)}</b></div>
     </section>
 
@@ -2197,10 +2238,11 @@ app.get("/admin", (req, res) => {
       <h2>Reparto entre coparticipantes</h2>
       <p class="hint">Los porcentajes se congelan en cada venta. La última columna acumula el neto asignado a cada participante.</p>
       ${distributionError ? `<div class="form-error">${escaparHtml(distributionError)}</div>` : ""}
-      <form method="POST" action="/admin/prototype/distribution-update">
+      <form method="POST" action="/admin/device/${encodeURIComponent(id)}/distribution-update" id="distribution-form">
+        <div class="participant-picker"><div><b>Cantidad de coparticipantes</b><div class="hint">Elegí cuántas personas o empresas participan en este módulo.</div></div><select name="participantCount" id="participant-count">${[1,2,3,4].map(count => `<option value="${count}" ${count === participantCount ? "selected" : ""}>${count} participante${count > 1 ? "s" : ""}</option>`).join("")}</select></div>
         <div class="participant-head"><span>#</span><span>Nombre</span><span>Participación</span><span>Neto acumulado</span></div>
         ${participantRows}
-        <div class="form-grid" style="margin-top:18px"><div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer">${feePayerOptions}</select></div></div>
+        <div class="form-grid" style="margin-top:18px"><div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer" id="mp-fee-payer">${feePayerOptions}</select></div></div>
         <div class="distribution-note">Este reparto es una liquidación contable. Mercado Pago estándar transfiere automáticamente solo entre vendedor y marketplace; los pagos 1:N requieren habilitación comercial especial.</div>
         <div class="actions"><button class="btn primary" type="submit">Guardar reparto</button></div>
       </form>
@@ -2209,7 +2251,7 @@ app.get("/admin", (req, res) => {
     <section class="columns">
       <div class="card">
         <h2>Configuración del servicio</h2>
-        <form method="POST" action="/admin/prototype/update">
+        <form method="POST" action="/admin/device/${encodeURIComponent(id)}/update">
           <div class="switches">
             <label class="check"><input type="checkbox" name="activo" ${d.activo && cfg.activo ? "checked" : ""}> Equipo habilitado</label>
             <label class="check"><input type="checkbox" name="mantenimiento" ${d.modoMantenimiento ? "checked" : ""}> Modo mantenimiento</label>
@@ -2248,13 +2290,22 @@ app.get("/admin", (req, res) => {
         <h3>Estado del equipo</h3>
         <div class="owner-line"><span>Última conexión</span><b>${escaparHtml(ultimaConexion)}</b></div>
         <div class="owner-line"><span>Salida</span><b>GPIO 40</b></div>
-        <div class="owner-line"><span>Moneda</span><b>${escaparHtml(configGlobal.moneda || "ARS")}</b></div>
+        <div class="owner-line"><span>Mercado</span><b>${d.paisOperacion === "BR" ? "Brasil" : "Argentina"}</b></div>
+        <div class="owner-line"><span>Moneda</span><b>${escaparHtml(monedaDevice(id))}</b></div>
+        <div class="country-note"><b>PIX / Brasil</b><div class="hint">La plataforma está preparada para separar el mercado por módulo. PIX se habilita al vincular una cuenta Mercado Pago Brasil compatible; una cuenta argentina no puede cobrar PIX directamente.</div></div>
       </aside>
     </section>
 
-    <section class="card" style="margin-top:16px"><h2>Servicios confirmados por el equipo</h2><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Pago</th><th>Monto</th><th>Comisión MP</th><th>Neto MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
+    <section class="card" style="margin-top:16px"><h2>Servicios confirmados por el equipo</h2><p class="hint">La tasa mostrada es el porcentaje real descontado en cada transacción, no una estimación.</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Pago</th><th>Monto</th><th>Comisión MP</th><th>% MP real</th><th>Neto MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
+    <details class="card module-add"><summary>+ Incorporar otro módulo</summary><form class="new-device-form" method="POST" action="/admin/device/add"><div class="field"><label>Identificador único</label><input name="deviceId" placeholder="CAFE_LOCAL_002" pattern="[A-Za-z0-9_-]{3,40}" required></div><div class="field"><label>Tipo</label><select name="tipo"><option value="basic">Servicio temporizado</option><option value="gachapon">Expendedora / premios</option><option value="arcade">Arcade / créditos</option><option value="premium">Planes múltiples</option></select></div><button class="btn primary" type="submit">Crear módulo</button></form></details>
     <div class="footer">Los cambios de precio y tiempos son consultados automáticamente por la pantalla. Base: ${escaparHtml(PUBLIC_BASE_URL)}</div>
-    <script>setInterval(async()=>{try{const r=await fetch('/admin/prototype/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp)}catch(_){ }},5000);</script>
+    <script>
+      const participantCount=document.getElementById('participant-count');
+      const feePayer=document.getElementById('mp-fee-payer');
+      function syncParticipantRows(){const count=Number(participantCount.value);document.querySelectorAll('[data-participant-row]').forEach(row=>{const number=Number(row.dataset.participantRow);const visible=number<=count;row.hidden=!visible;row.querySelectorAll('input').forEach(input=>input.disabled=!visible);const option=feePayer.querySelector('option[value="p'+number+'"]');const name=row.querySelector('input[name^="participant_name_"]')?.value.trim();if(option){option.hidden=!visible;option.textContent=name||'Coparticipante '+number}});if(feePayer.selectedOptions[0]?.hidden)feePayer.value='proportional'}
+      participantCount.addEventListener('change',syncParticipantRows);document.querySelectorAll('input[name^="participant_name_"]').forEach(input=>input.addEventListener('input',syncParticipantRows));syncParticipantRows();
+      setInterval(async()=>{try{const r=await fetch('/admin/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp);document.getElementById('mp-rate').textContent=Number(s.tasaMpEfectiva||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%'}catch(_){ }},5000);
+    </script>
   </main></body></html>`);
 });
 
@@ -2662,6 +2713,140 @@ function celdaCsv(value) {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
+function adminDeviceUrl(deviceId, params = "") {
+  return `/admin?device=${encodeURIComponent(deviceId)}${params}`;
+}
+
+function enviarBackupUso(deviceId, res) {
+  const id = String(deviceId || "").trim().toUpperCase();
+  const events = eventosUsoDevice(id);
+  const columns = [
+    "event_id", "payment_id", "device_id", "approved_at", "started_at", "finished_at",
+    "amount", "mp_fee", "mp_effective_rate_pct", "net_after_mp", "sold_seconds", "actual_seconds",
+    "evetec", "owner", "participant_1", "participant_1_net", "participant_2",
+    "participant_2_net", "participant_3", "participant_3_net", "participant_4",
+    "participant_4_net", "mode", "completed"
+  ];
+  const rows = events.map(e => {
+    const amountCents = Number(e.amount_cents || 0);
+    const feeCents = Number(e.mp_fee_cents || 0);
+    return [
+      e.event_id, e.payment_id, e.device_id,
+      e.approved_epoch ? new Date(Number(e.approved_epoch) * 1000).toISOString() : "",
+      e.started_epoch ? new Date(Number(e.started_epoch) * 1000).toISOString() : "",
+      e.finished_epoch ? new Date(Number(e.finished_epoch) * 1000).toISOString() : "",
+      (amountCents / 100).toFixed(2), (feeCents / 100).toFixed(2),
+      (amountCents > 0 ? feeCents * 100 / amountCents : 0).toFixed(4),
+      ((amountCents - feeCents) / 100).toFixed(2),
+      Number(e.sold_seconds || 0), Number(e.actual_seconds || 0),
+      (Number(e.evetec_cents || 0) / 100).toFixed(2),
+      (Number(e.owner_cents || 0) / 100).toFixed(2),
+      ...[0, 1, 2, 3].flatMap(index => {
+        const p = (e.participants || [])[index] || {};
+        return [p.nombre || "", (Number(p.neto_cents || 0) / 100).toFixed(2)];
+      }),
+      e.mode || "", e.completed !== false ? "yes" : "no"
+    ];
+  });
+  const csv = "\uFEFF" + [columns, ...rows].map(row => row.map(celdaCsv).join(",")).join("\r\n");
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.set("Content-Type", "text/csv; charset=utf-8");
+  res.set("Content-Disposition", `attachment; filename="evetec-${id}-${stamp}.csv"`);
+  res.send(csv);
+}
+
+app.get("/admin/device/:deviceId/usage-backup.csv", (req, res) => {
+  enviarBackupUso(req.params.deviceId, res);
+});
+
+app.post("/admin/device/:deviceId/backup-confirm", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const d = asegurarDevice(id);
+  d.backupConfirmedCount = eventosUsoDevice(id).length;
+  d.backupConfirmedAt = new Date().toISOString();
+  guardarDatos();
+  res.redirect(adminDeviceUrl(id));
+});
+
+app.post("/admin/device/:deviceId/toggle-sales-log", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const d = asegurarDevice(id);
+  d.registroVentasHabilitado = d.registroVentasHabilitado === false;
+  guardarDatos();
+  res.redirect(adminDeviceUrl(id));
+});
+
+app.get("/admin/device/:deviceId/live-stats", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const usageList = eventosUsoDevice(id);
+  const d = asegurarDevice(id);
+  const stats = usageList.length ? statsDesdeUso(id) : (d.stats || statsIniciales());
+  const total = Number(stats.totalRecaudado || 0);
+  res.set("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    comisionesMp: Number(stats.comisionesMp || 0),
+    netoDespuesMp: Number(stats.netoDespuesMp || 0),
+    tasaMpEfectiva: total > 0 ? Number(stats.comisionesMp || 0) * 100 / total : 0,
+    pagosAprobados: Number(stats.pagosAprobados || 0),
+    participantTotals: stats.participantTotals || {}
+  });
+});
+
+app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const d = asegurarDevice(id);
+  const count = Math.max(1, Math.min(4, Math.round(Number(req.body.participantCount || 1))));
+  const participants = [1, 2, 3, 4].map(index => ({
+    id: `p${index}`,
+    nombre: index <= count ? String(req.body[`participant_name_${index}`] || "").trim().slice(0, 40) : "",
+    porcentaje: index <= count ? Math.max(0, Math.min(100, Number(req.body[`participant_pct_${index}`] || 0))) : 0
+  }));
+  const active = participants.slice(0, count).filter(p => p.nombre && p.porcentaje > 0);
+  const total = active.reduce((sum, p) => sum + p.porcentaje, 0);
+  let error = "";
+  if (active.length !== count) error = "Completá el nombre y porcentaje de todos los coparticipantes elegidos.";
+  else if (Math.abs(total - 100) > 0.001) error = "Los participantes activos deben sumar exactamente 100%.";
+  const feePayer = String(req.body.mpFeePayer || "proportional");
+  if (!error && feePayer !== "proportional" && !active.some(p => p.id === feePayer)) {
+    error = "El responsable de la comisión debe ser un participante activo.";
+  }
+  if (error) return res.redirect(adminDeviceUrl(id, `&dist_error=${encodeURIComponent(error)}`));
+  d.cantidadParticipantes = count;
+  d.participantes = participants;
+  d.pagadorComisionMp = feePayer;
+  guardarDatos();
+  res.redirect(adminDeviceUrl(id));
+});
+
+app.post("/admin/device/:deviceId/update", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const d = asegurarDevice(id);
+  const cfg = configuracionServicioDevice(id);
+  const activo = req.body.activo === "on";
+  const monto = Number(req.body.monto);
+  const minutos = Number(req.body.minutos);
+  const segundos = Number(req.body.segundosServicio);
+  const preinicio = Number(req.body.preinicioSegundos);
+  const comision = Number(req.body.comision);
+  d.activo = activo;
+  d.modoMantenimiento = req.body.mantenimiento === "on";
+  cfg.activo = activo;
+  cfg.preinicioHabilitado = req.body.preinicioHabilitado === "on";
+  cfg.nombre = String(req.body.nombre || cfg.nombre).trim().slice(0, 60);
+  cfg.descripcion = String(req.body.descripcion || cfg.descripcion).trim().slice(0, 120);
+  if (Number.isFinite(monto) && monto > 0) cfg.monto = Math.round(monto * 100) / 100;
+  if (Number.isFinite(minutos) && Number.isFinite(segundos)) {
+    cfg.segundos = Math.max(1, Math.min(3600, Math.round(Math.max(0, Math.min(60, minutos))) * 60 + Math.round(Math.max(0, Math.min(59, segundos)))));
+  }
+  if (Number.isFinite(preinicio)) cfg.preinicioSegundos = Math.max(0, Math.min(120, Math.round(preinicio)));
+  if (Number.isFinite(comision)) d.comisionEvetecPorcentaje = Math.max(0, Math.min(100, comision));
+  const modo = String(req.body.modoCobro || "owner_commission");
+  d.modoCobro = ["owner_commission", "owner_direct", "evetec"].includes(modo) ? modo : "owner_commission";
+  guardarDatos();
+  res.redirect(adminDeviceUrl(id));
+});
+
 app.get("/admin/prototype/usage-backup.csv", (req, res) => {
   const events = eventosUsoDevice(PROTOTYPE_DEVICE_ID);
   const columns = [
@@ -2751,7 +2936,7 @@ app.post("/admin/prototype/distribution-update", (req, res) => {
 
 app.post("/admin/prototype/update", (req, res) => {
   const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
-  const cfg = configGlobal.basic;
+  const cfg = configuracionServicioDevice(PROTOTYPE_DEVICE_ID);
   const activo = req.body.activo === "on";
   const modo = String(req.body.modoCobro || "owner_commission");
   const monto = Number(req.body.monto);
@@ -2799,13 +2984,14 @@ app.post("/admin/global/update", (req, res) => {
 });
 
 app.post("/admin/basic/update", (req, res) => {
-  configGlobal.basic.activo = req.body.activo === "on";
-  configGlobal.basic.nombre = req.body.nombre || configGlobal.basic.nombre;
-  configGlobal.basic.monto = Number(req.body.monto) || configGlobal.basic.monto;
-  configGlobal.basic.segundos = Math.max(1, Math.min(3600, Number(req.body.segundos) || configGlobal.basic.segundos));
-  configGlobal.basic.preinicioSegundos = Math.max(0, Math.min(120, Number(req.body.preinicioSegundos) || 0));
-  configGlobal.basic.descripcion = req.body.descripcion || configGlobal.basic.descripcion;
-  configGlobal.basic.montoBase = configGlobal.basic.montoBase || configGlobal.basic.monto;
+  const cfg = configuracionServicioDevice(PROTOTYPE_DEVICE_ID);
+  cfg.activo = req.body.activo === "on";
+  cfg.nombre = req.body.nombre || cfg.nombre;
+  cfg.monto = Number(req.body.monto) || cfg.monto;
+  cfg.segundos = Math.max(1, Math.min(3600, Number(req.body.segundos) || cfg.segundos));
+  cfg.preinicioSegundos = Math.max(0, Math.min(120, Number(req.body.preinicioSegundos) || 0));
+  cfg.descripcion = req.body.descripcion || cfg.descripcion;
+  cfg.montoBase = cfg.montoBase || cfg.monto;
   guardarDatos();
   res.redirect("/admin");
 });
@@ -2949,15 +3135,16 @@ app.post("/admin/premium/reset-prices", (req, res) => {
 });
 
 app.post("/admin/device/add", (req, res) => {
-  const id = String(req.body.deviceId || "").trim().toUpperCase();
+  const id = String(req.body.deviceId || "").trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "").slice(0, 40);
   const tipo = String(req.body.tipo || detectarTipoDevice(id)).toLowerCase();
 
-  if (id) {
+  if (id && !devices[id]) {
     devices[id] = nuevoDevice(["basic", "premium", "gachapon", "arcade"].includes(tipo) ? tipo : detectarTipoDevice(id));
+    asegurarDevice(id).configuracionServicio.nombre = id.replace(/[_-]+/g, " ");
   }
 
   guardarDatos();
-  res.redirect("/admin");
+  res.redirect(id ? adminDeviceUrl(id) : "/admin");
 });
 
 app.post("/admin/device/:deviceId/status", (req, res) => {
