@@ -106,8 +106,8 @@ let configGlobal = {
     segundos: 240,
     preinicioHabilitado: true,
     preinicioSegundos: 15,
-    monto: 10,
-    montoBase: 10,
+    monto: 1,
+    montoBase: 1,
     descripcion: "Inflador de autos por 4 minutos"
   },
 
@@ -173,8 +173,15 @@ function nuevoDevice(tipo = "premium") {
   };
 }
 
+function nuevoPrototypeDevice() {
+  return {
+    ...nuevoDevice("basic"),
+    modoCobro: "evetec"
+  };
+}
+
 let devices = {
-  [PROTOTYPE_DEVICE_ID]: nuevoDevice("basic")
+  [PROTOTYPE_DEVICE_ID]: nuevoPrototypeDevice()
 };
 
 let pagosCreados = {};
@@ -237,10 +244,16 @@ function detectarTipoDevice(deviceId) {
 }
 
 function limpiarDevicesMigrados(obj) {
-  const actual = obj && obj[PROTOTYPE_DEVICE_ID];
-  return {
-    [PROTOTYPE_DEVICE_ID]: actual || nuevoDevice("basic")
-  };
+  const migrated = {};
+  if (obj && typeof obj === "object") {
+    for (const [rawId, value] of Object.entries(obj)) {
+      const id = String(rawId || "").trim().toUpperCase();
+      if (!id || !value || typeof value !== "object") continue;
+      migrated[id] = value;
+    }
+  }
+  if (!migrated[PROTOTYPE_DEVICE_ID]) migrated[PROTOTYPE_DEVICE_ID] = nuevoPrototypeDevice();
+  return migrated;
 }
 
 function asegurarEstructuraConfig() {
@@ -395,7 +408,7 @@ function cargarDatos() {
     }
 
     if (!devices[PROTOTYPE_DEVICE_ID]) {
-      devices[PROTOTYPE_DEVICE_ID] = nuevoDevice("basic");
+      devices[PROTOTYPE_DEVICE_ID] = nuevoPrototypeDevice();
     }
 
     console.log("Datos EVETEC cargados");
