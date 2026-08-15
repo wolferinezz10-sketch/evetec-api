@@ -25,6 +25,22 @@ const DATA_FILE = process.env.DATA_FILE || "evetec-timers-data.json";
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
 const oauthStates = new Map();
 
+function invalidarOauthParticipante(deviceId, participantId) {
+  const normalizedDeviceId = String(deviceId || "").trim().toUpperCase();
+  const normalizedParticipantId = String(participantId || "").trim().toLowerCase();
+  let invalidated = 0;
+  for (const [stateToken, stateData] of oauthStates) {
+    if (
+      String(stateData?.deviceId || "").trim().toUpperCase() === normalizedDeviceId &&
+      String(stateData?.participantId || "").trim().toLowerCase() === normalizedParticipantId
+    ) {
+      oauthStates.delete(stateToken);
+      invalidated++;
+    }
+  }
+  return invalidated;
+}
+
 function comparacionSegura(a, b) {
   const aa = Buffer.from(String(a || ""));
   const bb = Buffer.from(String(b || ""));
@@ -1821,8 +1837,12 @@ app.get("/oauth/participant-link/:deviceId/:participantId", (req, res) => {
     if (!participant || participantId === "p1") {
       return res.status(404).json({ ok: false, error: "participante_invalido" });
     }
+    if (d.participantLinkRequest?.participantId !== participantId) {
+      return res.status(410).json({ ok: false, error: "vinculacion_cancelada", qr_size: 0, qr_matrix: "" });
+    }
     if (!MP_CLIENT_ID) return res.status(503).json({ ok: false, error: "Falta MP_CLIENT_ID" });
 
+    invalidarOauthParticipante(deviceId, participantId);
     const stateToken = crypto.randomBytes(24).toString("hex");
     oauthStates.set(stateToken, {
       deviceId,
@@ -2239,18 +2259,26 @@ app.get("/admin", (req, res) => {
   const backupProgress = Math.min(100, (paymentsSinceBackup / 4000) * 100);
   const distributionError = String(req.query.dist_error || "");
   const participantCount = Math.max(1, Math.min(4, Number(d.cantidadParticipantes || 1)));
-  const participantRows = d.participantes.map((p, index) => `
-    <div class="participant-row" data-participant-row="${index + 1}" ${index >= participantCount ? "hidden" : ""}>
-      <span class="participant-number">${index + 1}</span>
-      <input name="participant_name_${index + 1}" maxlength="40" placeholder="Nombre del coparticipante" value="${escaparHtml(index === 0 ? "EVETEC" : p.nombre)}" ${index === 0 ? "readonly aria-label=\"EVETEC, participante fijo\"" : ""}>
-      <div class="percent-input"><input name="participant_pct_${index + 1}" type="number" min="0" max="100" step="0.01" value="${Number(p.porcentaje)}"><span>%</span></div>
-      <b>$${formatoDinero(Number(stats.participantTotals?.[p.id] || 0))}</b>
-      <div class="participant-account">${index === 0
-        ? `<span class="pill ${EVETEC_MP_TOKEN ? "success" : "warning"}">${EVETEC_MP_TOKEN ? "Cuenta base lista" : "Falta credencial"}</span>`
-        : `<span class="pill ${p.linked && p.accessToken ? "success" : "muted"}">${p.linked && p.accessToken ? "Cuenta vinculada" : "Sin vincular"}</span><button class="mini-btn" type="button" data-participant-link="${p.id}">${p.linked && p.accessToken ? "Cambiar QR" : "Generar QR"}</button>${p.linked && p.accessToken ? `<button class="mini-btn danger-mini" type="button" data-participant-unlink="${p.id}">Desvincular</button>` : ""}`}
-      </div>
-    </div>
-  `).join("");
+  const participantRows = d.participantes.map((p, index) => {
+    const linked = Boolean(p.linked && p.accessToken);
+    const pending = index > 0 && d.participantLinkRequest?.participantId === p.id;
+    const accountControls = index === 0
+      ? `<span class="pill ${EVETEC_MP_TOKEN ? "success" : "warning"}">${EVETEC_MP_TOKEN ? "Cuenta base lista" : "Falta credencial"}</span>`
+      : `${pending
+          ? `<span class="pill warning">QR pendiente: ${escaparHtml(d.participantLinkRequest.alias || p.nombre || p.id)}</span>`
+          : `<span class="pill ${linked ? "success" : "muted"}">${linked ? "Cuenta vinculada" : "Sin vincular"}</span>`}
+        <button class="mini-btn" type="button" data-participant-link="${p.id}">${pending ? "Reemplazar QR" : (linked ? "Cambiar cuenta" : "Generar QR")}</button>
+        ${pending ? `<button class="mini-btn danger-mini" type="button" data-participant-cancel="${p.id}">Cancelar QR</button>` : ""}
+        ${linked ? `<button class="mini-btn danger-mini" type="button" data-participant-unlink="${p.id}">Desvincular cuenta</button>` : ""}`;
+    return `
+      <div class="participant-row" data-participant-row="${index + 1}" ${index >= participantCount ? "hidden" : ""}>
+        <span class="participant-number">${index + 1}</span>
+        <input name="participant_name_${index + 1}" maxlength="40" placeholder="Nombre del coparticipante" value="${escaparHtml(index === 0 ? "EVETEC" : p.nombre)}" ${index === 0 ? "readonly aria-label=\"EVETEC, participante fijo\"" : ""}>
+        <div class="percent-input"><input name="participant_pct_${index + 1}" type="number" min="0" max="100" step="0.01" value="${Number(p.porcentaje)}"><span>%</span></div>
+        <b>$${formatoDinero(Number(stats.participantTotals?.[p.id] || 0))}</b>
+        <div class="participant-account">${accountControls}</div>
+      </div>`;
+  }).join("");
   const feePayerOptions = [
     `<option value="proportional" ${d.pagadorComisionMp === "proportional" ? "selected" : ""}>Proporcional entre todos</option>`,
     ...d.participantes.map((p, index) => `<option value="p${index + 1}" ${index >= participantCount ? "hidden" : ""} ${d.pagadorComisionMp === `p${index + 1}` ? "selected" : ""}>${escaparHtml(p.nombre || `Coparticipante ${index + 1}`)}</option>`)
@@ -2405,8 +2433,9 @@ app.get("/admin", (req, res) => {
       const feePayer=document.getElementById('mp-fee-payer');
       function syncParticipantRows(){const count=Number(participantCount.value);document.querySelectorAll('[data-participant-row]').forEach(row=>{const number=Number(row.dataset.participantRow);const visible=number<=count;row.hidden=!visible;row.querySelectorAll('input').forEach(input=>input.disabled=!visible);const option=feePayer.querySelector('option[value="p'+number+'"]');const name=row.querySelector('input[name^="participant_name_"]')?.value.trim();if(option){option.hidden=!visible;option.textContent=name||'Coparticipante '+number}});if(feePayer.selectedOptions[0]?.hidden)feePayer.value='proportional'}
       participantCount.addEventListener('change',syncParticipantRows);document.querySelectorAll('input[name^="participant_name_"]').forEach(input=>input.addEventListener('input',syncParticipantRows));syncParticipantRows();
-      document.querySelectorAll('[data-participant-link]').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[data-participant-row]');const alias=row.querySelector('input[name^="participant_name_"]').value.trim();if(!alias){alert('Escribí primero el alias del participante.');return}button.disabled=true;button.textContent='Enviando...';try{const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantLink,alias})});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo generar el QR');button.textContent='QR enviado al módulo';setTimeout(()=>{button.disabled=false;button.textContent='Generar otro QR'},3000)}catch(error){button.disabled=false;button.textContent='Generar QR';alert(error.message)}}));
-      document.querySelectorAll('[data-participant-unlink]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Desvincular esta cuenta de Mercado Pago?'))return;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantUnlink})});if(response.ok)location.reload();else alert('No se pudo desvincular la cuenta.')}));
+      document.querySelectorAll('[data-participant-link]').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[data-participant-row]');const alias=row.querySelector('input[name^="participant_name_"]').value.trim();if(!alias){alert('Escribí primero el alias del participante.');return}button.disabled=true;button.textContent='Enviando...';try{const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantLink,alias})});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo generar el QR');location.reload()}catch(error){button.disabled=false;button.textContent='Generar QR';alert(error.message)}}));
+      document.querySelectorAll('[data-participant-cancel]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Cancelar este QR? Dejará de mostrarse en el módulo y ya no podrá completar la vinculación.'))return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantCancel})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo cancelar el QR.')}}));
+      document.querySelectorAll('[data-participant-unlink]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Desvincular esta cuenta de Mercado Pago? El módulo dejará de usarla para nuevos cobros.'))return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantUnlink})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo desvincular la cuenta.')}}));
       setInterval(async()=>{try{const r=await fetch('/admin/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp);document.getElementById('mp-rate').textContent=Number(s.tasaMpEfectiva||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%'}catch(_){ }},5000);
     </script>
   </main></body></html>`);
@@ -2919,6 +2948,7 @@ app.post("/admin/device/:deviceId/participant-link-request", (req, res) => {
   if (!participant || participantId === "p1" || !alias || participantNumber < 2 || participantNumber > 4) {
     return res.status(400).json({ ok: false, error: "Elegí un participante y escribí su alias." });
   }
+  invalidarOauthParticipante(id, participantId);
   participant.nombre = alias;
   d.cantidadParticipantes = Math.max(d.cantidadParticipantes, participantNumber);
   d.participantLinkRequest = {
@@ -2928,6 +2958,29 @@ app.post("/admin/device/:deviceId/participant-link-request", (req, res) => {
   };
   guardarDatos();
   res.json({ ok: true, participant_id: participantId, alias, message: "QR solicitado al módulo" });
+});
+
+app.post("/admin/device/:deviceId/participant-link-cancel", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const participantId = String(req.body.participantId || "").trim().toLowerCase();
+  const d = asegurarDevice(id);
+  const pendingParticipantId = String(d.participantLinkRequest?.participantId || "").trim().toLowerCase();
+  if (!pendingParticipantId) {
+    return res.json({ ok: true, canceled: false, message: "No había un QR pendiente" });
+  }
+  if (participantId && participantId !== pendingParticipantId) {
+    return res.status(409).json({ ok: false, error: "Ese QR ya no es la vinculación pendiente." });
+  }
+  const invalidatedStates = invalidarOauthParticipante(id, pendingParticipantId);
+  d.participantLinkRequest = null;
+  guardarDatos();
+  res.json({
+    ok: true,
+    canceled: true,
+    participant_id: pendingParticipantId,
+    invalidated_states: invalidatedStates,
+    message: "QR cancelado"
+  });
 });
 
 app.post("/admin/device/:deviceId/participant-unlink", (req, res) => {
@@ -2942,8 +2995,9 @@ app.post("/admin/device/:deviceId/participant-unlink", (req, res) => {
   participant.userId = null;
   participant.email = "";
   if (d.participantLinkRequest?.participantId === participantId) d.participantLinkRequest = null;
+  invalidarOauthParticipante(id, participantId);
   guardarDatos();
-  res.json({ ok: true });
+  res.json({ ok: true, participant_id: participantId, message: "Cuenta desvinculada para nuevos cobros" });
 });
 
 app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
