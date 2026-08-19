@@ -20,6 +20,8 @@ const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const DEVICE_API_KEY = process.env.DEVICE_API_KEY || "";
 const PROTOTYPE_DEVICE_ID = "ASPIRADORA_BASIC_001";
+const MAX_PARTICIPANTS = 8;
+const PARTICIPANT_NUMBERS = Array.from({ length: MAX_PARTICIPANTS }, (_, index) => index + 1);
 
 const DATA_FILE = process.env.DATA_FILE || "evetec-timers-data.json";
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
@@ -174,12 +176,11 @@ function nuevoDevice(tipo = "premium") {
     comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE,
     modoCobro: "owner_commission",
     registroVentasHabilitado: true,
-    participantes: [
-      { id: "p1", nombre: "EVETEC", porcentaje: 100 },
-      { id: "p2", nombre: "", porcentaje: 0 },
-      { id: "p3", nombre: "", porcentaje: 0 },
-      { id: "p4", nombre: "", porcentaje: 0 }
-    ],
+    participantes: PARTICIPANT_NUMBERS.map(index => ({
+      id: `p${index}`,
+      nombre: index === 1 ? "EVETEC" : "",
+      porcentaje: index === 1 ? 100 : 0
+    })),
     cantidadParticipantes: 1,
     pagadorComisionMp: "proportional",
     configuracionServicio: null,
@@ -467,7 +468,8 @@ function asegurarDevice(deviceId) {
   if (typeof d.registroVentasHabilitado === "undefined") d.registroVentasHabilitado = true;
   if (!Array.isArray(d.participantes)) d.participantes = [];
   const participantesSinConfigurar = d.participantes.length === 0;
-  d.participantes = [0, 1, 2, 3].map(index => {
+  d.participantes = PARTICIPANT_NUMBERS.map(number => {
+    const index = number - 1;
     const source = d.participantes[index] || {};
     return {
       id: `p${index + 1}`,
@@ -487,8 +489,8 @@ function asegurarDevice(deviceId) {
     };
   });
   const participantesActivos = d.participantes.filter(p => p.nombre && Number(p.porcentaje) > 0).length;
-  d.cantidadParticipantes = Math.max(1, Math.min(4, Number(d.cantidadParticipantes || participantesActivos || 1)));
-  if (!["proportional", "p1", "p2", "p3", "p4"].includes(d.pagadorComisionMp)) {
+  d.cantidadParticipantes = Math.max(1, Math.min(MAX_PARTICIPANTS, Number(d.cantidadParticipantes || participantesActivos || 1)));
+  if (!["proportional", ...PARTICIPANT_NUMBERS.map(index => `p${index}`)].includes(d.pagadorComisionMp)) {
     d.pagadorComisionMp = "proportional";
   }
   if (!Number.isFinite(Number(d.backupConfirmedCount))) d.backupConfirmedCount = 0;
@@ -1745,7 +1747,7 @@ app.post("/device/usage-sync", requireDevice, (req, res) => {
       owner_cents: ownerCents,
       mp_fee_cents: Math.max(0, Math.round(Number(source.mp_fee_cents || 0))),
       net_received_cents: Math.round(Number(source.net_received_cents || 0)),
-      participants: (Array.isArray(source.participants) ? source.participants : []).slice(0, 4).map((p, index) => ({
+      participants: (Array.isArray(source.participants) ? source.participants : []).slice(0, MAX_PARTICIPANTS).map((p, index) => ({
         id: String(p.id || `p${index + 1}`).slice(0, 10),
         nombre: String(p.nombre || `Participante ${index + 1}`).slice(0, 40),
         porcentaje: Math.max(0, Math.min(100, Number(p.porcentaje || 0))),
@@ -2258,7 +2260,7 @@ app.get("/admin", (req, res) => {
   const backupDue = paymentsSinceBackup >= 4000;
   const backupProgress = Math.min(100, (paymentsSinceBackup / 4000) * 100);
   const distributionError = String(req.query.dist_error || "");
-  const participantCount = Math.max(1, Math.min(4, Number(d.cantidadParticipantes || 1)));
+  const participantCount = Math.max(1, Math.min(MAX_PARTICIPANTS, Number(d.cantidadParticipantes || 1)));
   const participantRows = d.participantes.map((p, index) => {
     const linked = Boolean(p.linked && p.accessToken);
     const pending = index > 0 && d.participantLinkRequest?.participantId === p.id;
@@ -2367,10 +2369,19 @@ app.get("/admin", (req, res) => {
       <p class="hint">Los porcentajes se congelan en cada venta. La última columna acumula el neto asignado a cada participante.</p>
       ${distributionError ? `<div class="form-error">${escaparHtml(distributionError)}</div>` : ""}
       <form method="POST" action="/admin/device/${encodeURIComponent(id)}/distribution-update" id="distribution-form">
-        <div class="participant-picker"><div><b>Participantes totales, incluyendo EVETEC</b><div class="hint">EVETEC siempre ocupa el primer lugar. Agregá hasta un dueño y otros dos socios.</div></div><select name="participantCount" id="participant-count">${[1,2,3,4].map(count => `<option value="${count}" ${count === participantCount ? "selected" : ""}>${count} participante${count > 1 ? "s" : ""}</option>`).join("")}</select></div>
+        <div class="participant-picker"><div><b>Participantes totales, incluyendo EVETEC</b><div class="hint">EVETEC siempre ocupa el primer lugar. Podés configurar hasta ocho participantes por módulo.</div></div><select name="participantCount" id="participant-count">${PARTICIPANT_NUMBERS.map(count => `<option value="${count}" ${count === participantCount ? "selected" : ""}>${count} participante${count > 1 ? "s" : ""}</option>`).join("")}</select></div>
+        <label class="check auto-share"><input type="checkbox" id="auto-distribution" checked> Ajustar automáticamente los demás porcentajes para completar 100% <span class="hint">Desmarcá para redondear o editar todo manualmente.</span></label>
         <div class="participant-head"><span>#</span><span>Alias</span><span>Participación</span><span>Neto acumulado</span><span>Cuenta Mercado Pago</span></div>
         ${participantRows}
-        <div class="form-grid" style="margin-top:18px"><div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer" id="mp-fee-payer">${feePayerOptions}</select></div></div>
+        <div class="form-grid" style="margin-top:18px">
+          <div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer" id="mp-fee-payer">${feePayerOptions}</select></div>
+          <div class="field"><label>Tipo de cobro</label><select name="modoCobro">
+            <option value="owner_commission" ${d.modoCobro === "owner_commission" ? "selected" : ""}>Cuenta del dueño + comisión EVETEC</option>
+            <option value="owner_direct" ${d.modoCobro === "owner_direct" ? "selected" : ""}>100% directo al dueño</option>
+            <option value="evetec" ${d.modoCobro === "evetec" ? "selected" : ""}>100% a cuenta EVETEC</option>
+          </select></div>
+          <div class="field"><label>Comisión EVETEC (%)</label><input name="comision" type="number" min="0" max="100" step="0.01" value="${Number(d.comisionEvetecPorcentaje)}" required></div>
+        </div>
         <div class="distribution-note">Este reparto es una liquidación contable. Mercado Pago estándar transfiere automáticamente solo entre vendedor y marketplace; los pagos 1:N requieren habilitación comercial especial.</div>
         <div class="actions"><button class="btn primary" type="submit">Guardar reparto</button></div>
       </form>
@@ -2391,12 +2402,6 @@ app.get("/admin", (req, res) => {
             <div class="field"><label>Duración: minutos</label><input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos) / 60)}" required></div>
             <div class="field"><label>Duración: segundos</label><input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos) % 60}" required></div>
             <div class="field"><label>Espera antes de encender (segundos)</label><input name="preinicioSegundos" type="number" min="0" max="120" value="${Number(cfg.preinicioSegundos)}" required></div>
-            <div class="field"><label>Tipo de cobro</label><select name="modoCobro">
-              <option value="owner_commission" ${d.modoCobro === "owner_commission" ? "selected" : ""}>Cuenta del dueño + comisión EVETEC</option>
-              <option value="owner_direct" ${d.modoCobro === "owner_direct" ? "selected" : ""}>100% directo al dueño</option>
-              <option value="evetec" ${d.modoCobro === "evetec" ? "selected" : ""}>100% a cuenta EVETEC</option>
-            </select></div>
-            <div class="field"><label>Comisión EVETEC (%)</label><input name="comision" type="number" min="0" max="100" step="0.01" value="${Number(d.comisionEvetecPorcentaje)}" required></div>
             <div class="field wide"><label>Descripción</label><input name="descripcion" value="${escaparHtml(cfg.descripcion)}" maxlength="120"></div>
           </div>
           <div class="actions"><button class="btn primary" type="submit">Guardar cambios</button></div>
@@ -2431,8 +2436,14 @@ app.get("/admin", (req, res) => {
     <script>
       const participantCount=document.getElementById('participant-count');
       const feePayer=document.getElementById('mp-fee-payer');
+      const autoDistribution=document.getElementById('auto-distribution');
+      let balancingPercentages=false;
       function syncParticipantRows(){const count=Number(participantCount.value);document.querySelectorAll('[data-participant-row]').forEach(row=>{const number=Number(row.dataset.participantRow);const visible=number<=count;row.hidden=!visible;row.querySelectorAll('input').forEach(input=>input.disabled=!visible);const option=feePayer.querySelector('option[value="p'+number+'"]');const name=row.querySelector('input[name^="participant_name_"]')?.value.trim();if(option){option.hidden=!visible;option.textContent=name||'Coparticipante '+number}});if(feePayer.selectedOptions[0]?.hidden)feePayer.value='proportional'}
-      participantCount.addEventListener('change',syncParticipantRows);document.querySelectorAll('input[name^="participant_name_"]').forEach(input=>input.addEventListener('input',syncParticipantRows));syncParticipantRows();
+      function activePercentageInputs(){return [...document.querySelectorAll('input[name^="participant_pct_"]')].filter(input=>!input.disabled)}
+      function percentageText(value){return (Math.round(value*100)/100).toFixed(2).replace(/\\.00$/,'')}
+      function equalizePercentages(){const inputs=activePercentageInputs();if(!inputs.length)return;balancingPercentages=true;const base=Math.floor(10000/inputs.length)/100;let used=0;inputs.forEach((input,index)=>{const value=index===inputs.length-1?100-used:base;input.value=percentageText(value);used=Math.round((used+value)*100)/100});balancingPercentages=false}
+      function rebalanceFrom(changed){if(balancingPercentages||!autoDistribution.checked)return;const inputs=activePercentageInputs();if(inputs.length===1){changed.value='100';return}const selected=Math.max(0,Math.min(100,Number(changed.value)||0));const others=inputs.filter(input=>input!==changed);const base=Math.floor(((100-selected)/others.length)*100)/100;balancingPercentages=true;changed.value=percentageText(selected);let used=selected;others.forEach((input,index)=>{const value=index===others.length-1?Math.max(0,100-used):base;input.value=percentageText(value);used=Math.round((used+value)*100)/100});balancingPercentages=false}
+      participantCount.addEventListener('change',()=>{syncParticipantRows();if(autoDistribution.checked)equalizePercentages()});document.querySelectorAll('input[name^="participant_name_"]').forEach(input=>input.addEventListener('input',syncParticipantRows));document.querySelectorAll('input[name^="participant_pct_"]').forEach(input=>input.addEventListener('input',()=>rebalanceFrom(input)));autoDistribution.addEventListener('change',()=>{if(autoDistribution.checked)equalizePercentages()});syncParticipantRows();
       document.querySelectorAll('[data-participant-link]').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[data-participant-row]');const alias=row.querySelector('input[name^="participant_name_"]').value.trim();if(!alias){alert('Escribí primero el alias del participante.');return}button.disabled=true;button.textContent='Enviando...';try{const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantLink,alias})});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo generar el QR');location.reload()}catch(error){button.disabled=false;button.textContent='Generar QR';alert(error.message)}}));
       document.querySelectorAll('[data-participant-cancel]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Cancelar este QR? Dejará de mostrarse en el módulo y ya no podrá completar la vinculación.'))return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantCancel})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo cancelar el QR.')}}));
       document.querySelectorAll('[data-participant-unlink]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Desvincular esta cuenta de Mercado Pago? El módulo dejará de usarla para nuevos cobros.'))return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantUnlink})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo desvincular la cuenta.')}}));
@@ -2855,9 +2866,9 @@ function enviarBackupUso(deviceId, res) {
   const columns = [
     "event_id", "payment_id", "device_id", "approved_at", "started_at", "finished_at",
     "amount", "mp_fee", "mp_effective_rate_pct", "net_after_mp", "sold_seconds", "actual_seconds",
-    "evetec", "owner", "participant_1", "participant_1_net", "participant_2",
-    "participant_2_net", "participant_3", "participant_3_net", "participant_4",
-    "participant_4_net", "mode", "completed"
+    "evetec", "owner",
+    ...PARTICIPANT_NUMBERS.flatMap(index => [`participant_${index}`, `participant_${index}_net`]),
+    "mode", "completed"
   ];
   const rows = events.map(e => {
     const amountCents = Number(e.amount_cents || 0);
@@ -2873,7 +2884,7 @@ function enviarBackupUso(deviceId, res) {
       Number(e.sold_seconds || 0), Number(e.actual_seconds || 0),
       (Number(e.evetec_cents || 0) / 100).toFixed(2),
       (Number(e.owner_cents || 0) / 100).toFixed(2),
-      ...[0, 1, 2, 3].flatMap(index => {
+      ...PARTICIPANT_NUMBERS.map(number => number - 1).flatMap(index => {
         const p = (e.participants || [])[index] || {};
         return [p.nombre || "", (Number(p.neto_cents || 0) / 100).toFixed(2)];
       }),
@@ -2945,7 +2956,7 @@ app.post("/admin/device/:deviceId/participant-link-request", (req, res) => {
   const d = asegurarDevice(id);
   const participant = d.participantes.find(p => p.id === participantId);
   const alias = String(req.body.alias || participant?.nombre || "").trim().slice(0, 40);
-  if (!participant || participantId === "p1" || !alias || participantNumber < 2 || participantNumber > 4) {
+  if (!participant || participantId === "p1" || !alias || participantNumber < 2 || participantNumber > MAX_PARTICIPANTS) {
     return res.status(400).json({ ok: false, error: "Elegí un participante y escribí su alias." });
   }
   invalidarOauthParticipante(id, participantId);
@@ -3003,8 +3014,8 @@ app.post("/admin/device/:deviceId/participant-unlink", (req, res) => {
 app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const d = asegurarDevice(id);
-  const count = Math.max(1, Math.min(4, Math.round(Number(req.body.participantCount || 1))));
-  const participants = [1, 2, 3, 4].map(index => {
+  const count = Math.max(1, Math.min(MAX_PARTICIPANTS, Math.round(Number(req.body.participantCount || 1))));
+  const participants = PARTICIPANT_NUMBERS.map(index => {
     const participantId = `p${index}`;
     const existing = d.participantes.find(p => p.id === participantId) || {};
     return {
@@ -3027,6 +3038,10 @@ app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
   d.cantidadParticipantes = count;
   d.participantes = participants;
   d.pagadorComisionMp = feePayer;
+  const comision = Number(req.body.comision);
+  if (Number.isFinite(comision)) d.comisionEvetecPorcentaje = Math.max(0, Math.min(100, comision));
+  const modo = String(req.body.modoCobro || d.modoCobro || "owner_commission");
+  if (["owner_commission", "owner_direct", "evetec"].includes(modo)) d.modoCobro = modo;
   guardarDatos();
   res.redirect(adminDeviceUrl(id));
 });
@@ -3040,7 +3055,6 @@ app.post("/admin/device/:deviceId/update", (req, res) => {
   const minutos = Number(req.body.minutos);
   const segundos = Number(req.body.segundosServicio);
   const preinicio = Number(req.body.preinicioSegundos);
-  const comision = Number(req.body.comision);
   d.activo = activo;
   d.modoMantenimiento = req.body.mantenimiento === "on";
   cfg.activo = activo;
@@ -3052,9 +3066,6 @@ app.post("/admin/device/:deviceId/update", (req, res) => {
     cfg.segundos = Math.max(1, Math.min(3600, Math.round(Math.max(0, Math.min(60, minutos))) * 60 + Math.round(Math.max(0, Math.min(59, segundos)))));
   }
   if (Number.isFinite(preinicio)) cfg.preinicioSegundos = Math.max(0, Math.min(120, Math.round(preinicio)));
-  if (Number.isFinite(comision)) d.comisionEvetecPorcentaje = Math.max(0, Math.min(100, comision));
-  const modo = String(req.body.modoCobro || "owner_commission");
-  d.modoCobro = ["owner_commission", "owner_direct", "evetec"].includes(modo) ? modo : "owner_commission";
   guardarDatos();
   res.redirect(adminDeviceUrl(id));
 });
@@ -3064,9 +3075,9 @@ app.get("/admin/prototype/usage-backup.csv", (req, res) => {
   const columns = [
     "event_id", "payment_id", "device_id", "approved_at", "started_at", "finished_at",
     "amount_ars", "mp_fee_ars", "net_after_mp_ars", "sold_seconds", "actual_seconds",
-    "evetec_ars", "owner_ars", "participant_1", "participant_1_net", "participant_2",
-    "participant_2_net", "participant_3", "participant_3_net", "participant_4",
-    "participant_4_net", "mode", "completed"
+    "evetec_ars", "owner_ars",
+    ...PARTICIPANT_NUMBERS.flatMap(index => [`participant_${index}`, `participant_${index}_net`]),
+    "mode", "completed"
   ];
   const rows = events.map(e => [
     e.event_id, e.payment_id, e.device_id,
@@ -3079,7 +3090,7 @@ app.get("/admin/prototype/usage-backup.csv", (req, res) => {
     Number(e.sold_seconds || 0), Number(e.actual_seconds || 0),
     (Number(e.evetec_cents || 0) / 100).toFixed(2),
     (Number(e.owner_cents || 0) / 100).toFixed(2),
-    ...[0, 1, 2, 3].flatMap(index => {
+    ...PARTICIPANT_NUMBERS.map(number => number - 1).flatMap(index => {
       const p = (e.participants || [])[index] || {};
       return [p.nombre || "", (Number(p.neto_cents || 0) / 100).toFixed(2)];
     }),
@@ -3123,7 +3134,7 @@ app.get("/admin/prototype/live-stats", (req, res) => {
 
 app.post("/admin/prototype/distribution-update", (req, res) => {
   const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
-  const participants = [1, 2, 3, 4].map(index => ({
+  const participants = PARTICIPANT_NUMBERS.map(index => ({
     id: `p${index}`,
     nombre: String(req.body[`participant_name_${index}`] || "").trim().slice(0, 40),
     porcentaje: Math.max(0, Math.min(100, Number(req.body[`participant_pct_${index}`] || 0)))
