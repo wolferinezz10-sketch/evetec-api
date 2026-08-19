@@ -2373,15 +2373,8 @@ app.get("/admin", (req, res) => {
         <label class="check auto-share"><input type="checkbox" id="auto-distribution" checked> Ajustar automáticamente los demás porcentajes para completar 100% <span class="hint">Desmarcá para redondear o editar todo manualmente.</span></label>
         <div class="participant-head"><span>#</span><span>Alias</span><span>Participación</span><span>Neto acumulado</span><span>Cuenta Mercado Pago</span></div>
         ${participantRows}
-        <div class="form-grid" style="margin-top:18px">
-          <div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer" id="mp-fee-payer">${feePayerOptions}</select></div>
-          <div class="field"><label>Tipo de cobro</label><select name="modoCobro">
-            <option value="owner_commission" ${d.modoCobro === "owner_commission" ? "selected" : ""}>Cuenta del dueño + comisión EVETEC</option>
-            <option value="owner_direct" ${d.modoCobro === "owner_direct" ? "selected" : ""}>100% directo al dueño</option>
-            <option value="evetec" ${d.modoCobro === "evetec" ? "selected" : ""}>100% a cuenta EVETEC</option>
-          </select></div>
-          <div class="field"><label>Comisión EVETEC (%)</label><input name="comision" type="number" min="0" max="100" step="0.01" value="${Number(d.comisionEvetecPorcentaje)}" required></div>
-        </div>
+        <div class="form-grid" style="margin-top:18px"><div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer" id="mp-fee-payer">${feePayerOptions}</select></div></div>
+        <div class="hint" style="margin-top:12px">La cuenta de cobro y la participación EVETEC se determinan automáticamente con los porcentajes configurados arriba.</div>
         <div class="distribution-note">Este reparto es una liquidación contable. Mercado Pago estándar transfiere automáticamente solo entre vendedor y marketplace; los pagos 1:N requieren habilitación comercial especial.</div>
         <div class="actions"><button class="btn primary" type="submit">Guardar reparto</button></div>
       </form>
@@ -3025,10 +3018,12 @@ app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
       porcentaje: index <= count ? Math.max(0, Math.min(100, Number(req.body[`participant_pct_${index}`] || 0))) : 0
     };
   });
-  const active = participants.slice(0, count).filter(p => p.nombre && p.porcentaje > 0);
-  const total = active.reduce((sum, p) => sum + p.porcentaje, 0);
+  const selected = participants.slice(0, count);
+  const active = selected.filter(p => p.nombre && p.porcentaje > 0);
+  const total = selected.reduce((sum, p) => sum + p.porcentaje, 0);
   let error = "";
-  if (active.length !== count) error = "Completá el nombre y porcentaje de todos los coparticipantes elegidos.";
+  if (selected.some(p => !p.nombre)) error = "Completá el nombre de todos los coparticipantes elegidos.";
+  else if (!active.length) error = "Al menos un participante debe tener un porcentaje mayor a cero.";
   else if (Math.abs(total - 100) > 0.001) error = "Los participantes activos deben sumar exactamente 100%.";
   const feePayer = String(req.body.mpFeePayer || "proportional");
   if (!error && feePayer !== "proportional" && !active.some(p => p.id === feePayer)) {
@@ -3038,10 +3033,11 @@ app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
   d.cantidadParticipantes = count;
   d.participantes = participants;
   d.pagadorComisionMp = feePayer;
-  const comision = Number(req.body.comision);
-  if (Number.isFinite(comision)) d.comisionEvetecPorcentaje = Math.max(0, Math.min(100, comision));
-  const modo = String(req.body.modoCobro || d.modoCobro || "owner_commission");
-  if (["owner_commission", "owner_direct", "evetec"].includes(modo)) d.modoCobro = modo;
+  const evetecPercentage = Math.max(0, Math.min(100, Number(participants[0]?.porcentaje || 0)));
+  d.comisionEvetecPorcentaje = evetecPercentage;
+  d.modoCobro = evetecPercentage >= 99.999
+    ? "evetec"
+    : (evetecPercentage > 0 ? "owner_commission" : "owner_direct");
   guardarDatos();
   res.redirect(adminDeviceUrl(id));
 });
