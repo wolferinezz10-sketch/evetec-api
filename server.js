@@ -20,6 +20,7 @@ const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const DEVICE_API_KEY = process.env.DEVICE_API_KEY || "";
 const PROTOTYPE_DEVICE_ID = "ASPIRADORA_BASIC_001";
+const PLUSH_DEVICE_ID = "PELUCHE_001";
 const MAX_PARTICIPANTS = 8;
 const PARTICIPANT_NUMBERS = Array.from({ length: MAX_PARTICIPANTS }, (_, index) => index + 1);
 
@@ -184,6 +185,7 @@ function nuevoDevice(tipo = "premium") {
     cantidadParticipantes: 1,
     pagadorComisionMp: "proportional",
     configuracionServicio: null,
+    configuracionGachapon: null,
     paisOperacion: "AR",
 
     stats: statsIniciales()
@@ -248,7 +250,8 @@ function detectarTipoDevice(deviceId) {
     return "arcade";
   }
 
-  if (id.includes("GACHAPON") || id.includes("GACHA")) {
+  if (id.includes("GACHAPON") || id.includes("GACHA") || id.includes("PELUCHE") ||
+      id.includes("PLUSH") || id.includes("GARRA")) {
     return "gachapon";
   }
 
@@ -438,12 +441,14 @@ asegurarEstructuraConfig();
 cargarDatos();
 asegurarEstructuraConfig();
 asegurarDevice(PROTOTYPE_DEVICE_ID);
+asegurarDevice(PLUSH_DEVICE_ID);
 
 function asegurarDevice(deviceId) {
   const id = String(deviceId || "ASPIRADORA_001").trim().toUpperCase() || "ASPIRADORA_001";
 
   if (!devices[id]) {
     devices[id] = nuevoDevice(detectarTipoDevice(id));
+    if (id.includes("PELUCHE")) devices[id].modoCobro = "evetec";
   }
 
   const d = devices[id];
@@ -493,6 +498,9 @@ function asegurarDevice(deviceId) {
   if (!["proportional", ...PARTICIPANT_NUMBERS.map(index => `p${index}`)].includes(d.pagadorComisionMp)) {
     d.pagadorComisionMp = "proportional";
   }
+  if (!Number.isFinite(Number(configGlobal.gachapon.cantidad_opciones))) {
+    configGlobal.gachapon.cantidad_opciones = 3;
+  }
   if (!Number.isFinite(Number(d.backupConfirmedCount))) d.backupConfirmedCount = 0;
   if (typeof d.backupConfirmedAt === "undefined") d.backupConfirmedAt = null;
   if (!d.participantLinkRequest || typeof d.participantLinkRequest !== "object") d.participantLinkRequest = null;
@@ -503,6 +511,32 @@ function asegurarDevice(deviceId) {
     ...configGlobal.basic,
     ...d.configuracionServicio
   };
+  if (d.tipo === "gachapon") {
+    const defaults = JSON.parse(JSON.stringify(configGlobal.gachapon));
+    if (!d.configuracionGachapon || typeof d.configuracionGachapon !== "object") {
+      d.configuracionGachapon = defaults;
+      if (id.includes("PELUCHE")) {
+        d.configuracionGachapon.nombre = "Máquina de Peluches 1";
+        d.configuracionGachapon.titulo = "ATRAPÁ TU PELUCHE";
+        d.configuracionGachapon.mensaje = "Elegí tus jugadas y pagá con QR";
+        d.configuracionGachapon.instruccion = "Elegí una opción";
+        d.configuracionGachapon.pulso_motor_ms = 500;
+        d.configuracionGachapon.pausa_premios_ms = 650;
+      }
+    }
+    d.configuracionGachapon = {
+      ...defaults,
+      ...d.configuracionGachapon,
+      planes: [0, 1, 2].map(index => ({
+        ...defaults.planes[index],
+        ...(d.configuracionGachapon.planes?.[index] || {}),
+        id: `G${index + 1}`,
+        creditos: index + 1
+      }))
+    };
+    d.configuracionGachapon.cantidad_opciones = Math.max(1, Math.min(3,
+      Number(d.configuracionGachapon.cantidad_opciones || 3)));
+  }
   if (!['AR', 'BR'].includes(d.paisOperacion)) d.paisOperacion = 'AR';
   if (!d.stats) d.stats = statsIniciales();
   if (!Array.isArray(d.stats.ultimosPagos)) d.stats.ultimosPagos = [];
@@ -513,6 +547,18 @@ function asegurarDevice(deviceId) {
 
 function configuracionServicioDevice(deviceId) {
   return asegurarDevice(deviceId).configuracionServicio;
+}
+
+function configuracionGachaponDevice(deviceId) {
+  const d = asegurarDevice(deviceId);
+  return d.configuracionGachapon || configGlobal.gachapon;
+}
+
+function nombreVisibleDevice(deviceId) {
+  const d = asegurarDevice(deviceId);
+  return d.tipo === "gachapon"
+    ? configuracionGachaponDevice(deviceId).nombre
+    : d.configuracionServicio?.nombre;
 }
 
 function monedaDevice(deviceId) {
@@ -652,7 +698,7 @@ function estadoOperativo(deviceId) {
     };
   }
 
-  if (d.tipo === "gachapon" && !configGlobal.gachapon.activo) {
+  if (d.tipo === "gachapon" && !configuracionGachaponDevice(deviceId).activo) {
     return {
       ok: false,
       motivo: "gachapon_desactivado",
@@ -755,8 +801,9 @@ function buscarPlanPremium(body) {
   };
 }
 
-function buscarPlanGachapon(body) {
-  const planes = configGlobal.gachapon.planes || [];
+function buscarPlanGachapon(body, deviceId) {
+  const cfg = configuracionGachaponDevice(deviceId || body.device_id || body.deviceId);
+  const planes = (cfg.planes || []).slice(0, cfg.cantidad_opciones || 3);
   const planIndexRaw = body.plan_index ?? body.planIndex;
   const planIndex = Number(planIndexRaw);
   const planId = String(body.plan_id || body.id || "").toUpperCase();
@@ -829,8 +876,10 @@ function normalizarPedidoPago(body) {
   }
 
   if (d.tipo === "gachapon" || String(body.tipo || body.modo || "").toLowerCase().includes("gachapon")) {
-    const plan = buscarPlanGachapon(body);
-    const giroMs = Math.max(500, Math.min(120000, Number(plan.giro_ms || plan.motor_ms || plan.tiempo_giro_ms || 10000)));
+    const cfg = configuracionGachaponDevice(device_id);
+    const plan = buscarPlanGachapon(body, device_id);
+    const pulseMs = Math.max(100, Math.min(10000, Number(cfg.pulso_motor_ms || 500)));
+    const creditos = Math.max(1, Math.min(3, Number(plan.creditos || body.creditos || 1)));
 
     return {
       device_id,
@@ -839,9 +888,9 @@ function normalizarPedidoPago(body) {
       plan_nombre: plan.nombre || `${plan.creditos || 1} CREDITO`,
       origen: "gachapon",
       monto: Number(plan.monto || plan.precio || body.monto || 1000),
-      segundos: Math.max(1, Math.ceil(giroMs / 1000)),
-      motor_ms: giroMs,
-      creditos: Number(plan.creditos || body.creditos || 1),
+      segundos: Math.max(1, Math.ceil((creditos * pulseMs + Math.max(0, creditos - 1) * Number(cfg.pausa_premios_ms || 650)) / 1000)),
+      motor_ms: pulseMs,
+      creditos,
       etiqueta: plan.etiqueta || ""
     };
   }
@@ -888,7 +937,8 @@ app.get("/config/:deviceId", (req, res) => {
   const operativo = estadoOperativo(deviceId);
 
   if (d.tipo === "gachapon") {
-    const g = configGlobal.gachapon;
+    const g = configuracionGachaponDevice(deviceId);
+    const cantidadOpciones = Math.max(1, Math.min(3, Number(g.cantidad_opciones || 3)));
     return res.json({
       ok: true,
       tipo: "gachapon",
@@ -899,7 +949,8 @@ app.get("/config/:deviceId", (req, res) => {
       nombre: g.nombre || "Gachapon",
       titulo: g.titulo || "GACHAPON",
       instruccion: g.instruccion || "Toca una opcion",
-      pulso_motor_ms: Number(g.pulso_motor_ms || 10000),
+      cantidad_opciones: cantidadOpciones,
+      pulso_motor_ms: Number(g.pulso_motor_ms || 500),
       pausa_premios_ms: Number(g.pausa_premios_ms || 650),
       giro1_ms: Number(g.planes?.[0]?.giro_ms || 10000),
       giro2_ms: Number(g.planes?.[1]?.giro_ms || 20000),
@@ -910,21 +961,26 @@ app.get("/config/:deviceId", (req, res) => {
       precio1: Number(g.planes?.[0]?.monto || 1000),
       precio2: Number(g.planes?.[1]?.monto || 1800),
       precio3: Number(g.planes?.[2]?.monto || 2500),
-      planes: (g.planes || []).slice(0, 3).map(p => ({
+      planes: (g.planes || []).slice(0, cantidadOpciones).map(p => ({
         id: p.id,
         creditos: Number(p.creditos || 1),
         nombre: p.nombre,
         etiqueta: p.etiqueta,
         monto: Number(p.monto || 0),
         precio: Number(p.monto || 0),
-        giro_ms: Number(p.giro_ms || 10000),
-        tiempo_giro_ms: Number(p.giro_ms || 10000),
-        motor_ms: Number(p.giro_ms || 10000),
+        giro_ms: Number(g.pulso_motor_ms || 500),
+        tiempo_giro_ms: Number(g.pulso_motor_ms || 500),
+        motor_ms: Number(g.pulso_motor_ms || 500),
         descripcion: p.descripcion || ""
       })),
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
       evetecAccountReady: Boolean(EVETEC_MP_TOKEN),
       modoCobro: d.modoCobro,
+      registro_ventas_habilitado: d.registroVentasHabilitado !== false,
+      participant_link_pending: d.participantLinkRequest ? {
+        participant_id: d.participantLinkRequest.participantId,
+        alias: d.participantLinkRequest.alias
+      } : null,
       comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
       serverTime: new Date().toISOString()
     });
@@ -1676,6 +1732,8 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
       payment_id: estado.payment_id,
       monto: Number(pagoLocal.monto || 0),
       segundos: Math.max(1, Math.min(3600, Number(pagoLocal.segundos || 0))),
+      creditos: Math.max(1, Math.min(3, Number(pagoLocal.creditos || 1))),
+      motor_ms: Math.max(100, Math.min(10000, Number(pagoLocal.motor_ms || 500))),
       approved_epoch: Math.floor(Date.now() / 1000),
       modo_cobro: pagoLocal.modoCobro || "evetec",
       comision_evetec: Number(pagoLocal.comisionEvetec || 0),
@@ -2247,7 +2305,7 @@ app.get("/admin", (req, res) => {
   const deviceIds = Object.keys(devices).sort();
   const id = requestedId && devices[requestedId] ? requestedId : (devices[PROTOTYPE_DEVICE_ID] ? PROTOTYPE_DEVICE_ID : deviceIds[0]);
   const d = asegurarDevice(id);
-  const cfg = configuracionServicioDevice(id);
+  const cfg = d.tipo === "gachapon" ? configuracionGachaponDevice(id) : configuracionServicioDevice(id);
   const usageList = eventosUsoDevice(id);
   const stats = usageList.length ? statsDesdeUso(id) : (d.stats || statsIniciales());
   const ultimoPago = stats.ultimosPagos?.[0] || null;
@@ -2290,7 +2348,7 @@ app.get("/admin", (req, res) => {
     : 0;
   const deviceTabs = deviceIds.map(deviceId => {
     const tabDevice = asegurarDevice(deviceId);
-    return `<a class="device-tab ${deviceId === id ? "active" : ""}" href="/admin?device=${encodeURIComponent(deviceId)}"><span class="tab-dot ${tabDevice.online ? "online-dot" : ""}"></span><span>${escaparHtml(tabDevice.configuracionServicio?.nombre || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`;
+    return `<a class="device-tab ${deviceId === id ? "active" : ""}" href="/admin?device=${encodeURIComponent(deviceId)}"><span class="tab-dot ${tabDevice.online ? "online-dot" : ""}"></span><span>${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`;
   }).join("");
 
   let pagosHtml = pagos.map(p => `
@@ -2308,6 +2366,44 @@ app.get("/admin", (req, res) => {
   `).join("");
 
   if (!pagosHtml) pagosHtml = `<tr><td colspan="9" class="empty">Todavía no hay servicios sincronizados desde este equipo.</td></tr>`;
+
+  const serviceConfigHtml = d.tipo === "gachapon" ? `
+        <h2>Configuración de la máquina de peluches</h2>
+        <form method="POST" action="/admin/device/${encodeURIComponent(id)}/update">
+          <div class="switches">
+            <label class="check"><input type="checkbox" name="activo" ${d.activo && cfg.activo ? "checked" : ""}> Equipo habilitado</label>
+            <label class="check"><input type="checkbox" name="mantenimiento" ${d.modoMantenimiento ? "checked" : ""}> Modo mantenimiento</label>
+          </div>
+          <div class="form-grid">
+            <div class="field wide"><label>Nombre visible y de la pestaña</label><input name="nombre" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></div>
+            <div class="field"><label>Opciones visibles</label><select name="cantidadOpciones">${[1,2,3].map(n => `<option value="${n}" ${Number(cfg.cantidad_opciones || 3) === n ? "selected" : ""}>${n} opción${n > 1 ? "es" : ""}</option>`).join("")}</select></div>
+            <div class="field"><label>Duración de cada pulso (ms)</label><input name="pulsoMotorMs" type="number" min="100" max="10000" step="50" value="${Number(cfg.pulso_motor_ms || 500)}" required></div>
+            <div class="field"><label>Pausa entre pulsos (ms)</label><input name="pausaPremiosMs" type="number" min="0" max="10000" step="50" value="${Number(cfg.pausa_premios_ms || 650)}" required></div>
+            <div class="field"><label>Título en pantalla</label><input name="titulo" value="${escaparHtml(cfg.titulo || "ATRAPÁ TU PELUCHE")}" maxlength="40"></div>
+            <div class="field wide"><label>Mensaje</label><input name="mensaje" value="${escaparHtml(cfg.mensaje || "Elegí tus jugadas y pagá con QR")}" maxlength="100"></div>
+          </div>
+          <h3>Precios por cantidad de jugadas</h3>
+          <div class="plan-grid">${[0,1,2].map(index => { const p = cfg.planes[index]; return `<div class="plan-card"><b>${index + 1} jugada${index ? "s" : ""}</b><label>Precio (ARS)<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(p.monto)}" required></label><label>Texto breve<input name="etiqueta${index}" value="${escaparHtml(p.etiqueta || "Elegir y pagar")}" maxlength="28"></label></div>`; }).join("")}</div>
+          <p class="hint">Cada jugada activa exactamente un pulso. Si dejás una sola opción, la pantalla mostrará únicamente la tarjeta de 1 jugada.</p>
+          <div class="actions"><button class="btn primary" type="submit">Guardar cambios</button></div>
+        </form>` : `
+        <h2>Configuración del servicio</h2>
+        <form method="POST" action="/admin/device/${encodeURIComponent(id)}/update">
+          <div class="switches">
+            <label class="check"><input type="checkbox" name="activo" ${d.activo && cfg.activo ? "checked" : ""}> Equipo habilitado</label>
+            <label class="check"><input type="checkbox" name="mantenimiento" ${d.modoMantenimiento ? "checked" : ""}> Modo mantenimiento</label>
+            <label class="check"><input type="checkbox" name="preinicioHabilitado" ${cfg.preinicioHabilitado !== false ? "checked" : ""}> Espera antes de encender</label>
+          </div>
+          <div class="form-grid">
+            <div class="field wide"><label>Nombre visible</label><input name="nombre" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></div>
+            <div class="field"><label>Precio (ARS)</label><input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></div>
+            <div class="field"><label>Duración: minutos</label><input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos) / 60)}" required></div>
+            <div class="field"><label>Duración: segundos</label><input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos) % 60}" required></div>
+            <div class="field"><label>Espera antes de encender (segundos)</label><input name="preinicioSegundos" type="number" min="0" max="120" value="${Number(cfg.preinicioSegundos)}" required></div>
+            <div class="field wide"><label>Descripción</label><input name="descripcion" value="${escaparHtml(cfg.descripcion)}" maxlength="120"></div>
+          </div>
+          <div class="actions"><button class="btn primary" type="submit">Guardar cambios</button></div>
+        </form>`;
 
   res.send(`<!doctype html>
   <html lang="es">
@@ -2330,8 +2426,9 @@ app.get("/admin", (req, res) => {
       .distribution{margin-bottom:16px}.participant-head,.participant-row{display:grid;grid-template-columns:34px minmax(150px,1fr) 120px 125px minmax(190px,auto);gap:10px;align-items:center}.participant-head{color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:800;padding:0 0 7px}.participant-row{margin:8px 0}.participant-number{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:var(--panel2);color:var(--cyan);font-weight:900}.percent-input{position:relative}.percent-input input{padding-right:32px}.percent-input span{position:absolute;right:12px;top:12px;color:var(--muted)}.distribution-note{border-left:3px solid var(--yellow);padding:10px 13px;margin-top:17px;background:#493b1833;color:#ffe7a7}.form-error{background:#4d1d26;border:1px solid #8f3445;color:#ffc1c8;padding:12px;border-radius:10px;margin-bottom:14px}.participant-account{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.mini-btn{border:1px solid #34506d;background:#20344a;color:var(--text);padding:7px 9px;border-radius:8px;font-weight:750;cursor:pointer}.danger-mini{background:#421d29;color:#ffb3bc;border-color:#7b3041}
       .device-tabs{display:flex;gap:10px;overflow:auto;margin:0 0 18px;padding:3px}.device-tab{min-width:205px;display:grid;grid-template-columns:10px 1fr;gap:2px 9px;align-items:center;padding:12px 14px;border:1px solid var(--line);border-radius:13px;background:#0b1725;color:var(--text);text-decoration:none}.device-tab.active{border-color:var(--cyan);background:#123047;box-shadow:0 0 0 1px #27d3e244}.device-tab small{grid-column:2;color:var(--muted);font-size:10px}.tab-dot{width:8px;height:8px;border-radius:50%;background:var(--red)}.online-dot{background:var(--green);box-shadow:0 0 9px var(--green)}.participant-picker{display:flex;align-items:center;justify-content:space-between;gap:16px;background:var(--panel2);padding:14px;border-radius:12px;margin:16px 0}.participant-picker select{width:150px}.mp-rate{color:var(--yellow)!important}.country-note{margin-top:16px;padding:14px;border:1px solid #31516c;border-radius:12px;background:#0a2032}.country-note b{color:var(--cyan)}
       details.module-add{margin-top:16px}details.module-add summary{cursor:pointer;font-weight:800;color:var(--cyan)}.new-device-form{display:grid;grid-template-columns:1fr 180px auto;gap:10px;margin-top:16px;align-items:end}
+      .plan-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.plan-card{display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--line);border-radius:13px;background:var(--panel2)}.plan-card>b{color:var(--cyan);font-size:16px}.plan-card label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
       table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.empty{text-align:center;color:var(--muted);padding:25px}.footer{margin-top:14px;color:var(--muted);font-size:12px}
-      @media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.participant-head{display:none}.participant-row{grid-template-columns:34px 1fr 110px}.participant-row>b,.participant-account{grid-column:2/-1}.new-device-form{grid-template-columns:1fr}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}.participant-row{grid-template-columns:30px 1fr}.percent-input,.participant-row>b,.participant-account{grid-column:2}}
+      @media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.participant-head{display:none}.participant-row{grid-template-columns:34px 1fr 110px}.participant-row>b,.participant-account{grid-column:2/-1}.new-device-form{grid-template-columns:1fr}}@media(max-width:650px){.plan-grid{grid-template-columns:1fr}}@media(max-width:520px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.stats{grid-template-columns:1fr 1fr}.card{padding:17px}.participant-row{grid-template-columns:30px 1fr}.percent-input,.participant-row>b,.participant-account{grid-column:2}}
     </style>
   </head>
   <body><main>
@@ -2382,23 +2479,7 @@ app.get("/admin", (req, res) => {
 
     <section class="columns">
       <div class="card">
-        <h2>Configuración del servicio</h2>
-        <form method="POST" action="/admin/device/${encodeURIComponent(id)}/update">
-          <div class="switches">
-            <label class="check"><input type="checkbox" name="activo" ${d.activo && cfg.activo ? "checked" : ""}> Equipo habilitado</label>
-            <label class="check"><input type="checkbox" name="mantenimiento" ${d.modoMantenimiento ? "checked" : ""}> Modo mantenimiento</label>
-            <label class="check"><input type="checkbox" name="preinicioHabilitado" ${cfg.preinicioHabilitado !== false ? "checked" : ""}> Espera antes de encender</label>
-          </div>
-          <div class="form-grid">
-            <div class="field wide"><label>Nombre visible</label><input name="nombre" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></div>
-            <div class="field"><label>Precio (ARS)</label><input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></div>
-            <div class="field"><label>Duración: minutos</label><input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos) / 60)}" required></div>
-            <div class="field"><label>Duración: segundos</label><input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos) % 60}" required></div>
-            <div class="field"><label>Espera antes de encender (segundos)</label><input name="preinicioSegundos" type="number" min="0" max="120" value="${Number(cfg.preinicioSegundos)}" required></div>
-            <div class="field wide"><label>Descripción</label><input name="descripcion" value="${escaparHtml(cfg.descripcion)}" maxlength="120"></div>
-          </div>
-          <div class="actions"><button class="btn primary" type="submit">Guardar cambios</button></div>
-        </form>
+        ${serviceConfigHtml}
       </div>
 
       <aside class="card">
@@ -2424,7 +2505,7 @@ app.get("/admin", (req, res) => {
     </section>
 
     <section class="card" style="margin-top:16px"><h2>Servicios confirmados por el equipo</h2><p class="hint">La tasa mostrada es el porcentaje real descontado en cada transacción, no una estimación.</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Pago</th><th>Monto</th><th>Comisión MP</th><th>% MP real</th><th>Neto MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
-    <details class="card module-add"><summary>+ Incorporar otro módulo</summary><form class="new-device-form" method="POST" action="/admin/device/add"><div class="field"><label>Identificador único</label><input name="deviceId" placeholder="CAFE_LOCAL_002" pattern="[A-Za-z0-9_-]{3,40}" required></div><div class="field"><label>Tipo</label><select name="tipo"><option value="basic">Servicio temporizado</option><option value="gachapon">Expendedora / premios</option><option value="arcade">Arcade / créditos</option><option value="premium">Planes múltiples</option></select></div><button class="btn primary" type="submit">Crear módulo</button></form></details>
+    <details class="card module-add"><summary>+ Incorporar otro módulo</summary><form class="new-device-form" method="POST" action="/admin/device/add"><div class="field"><label>Identificador único</label><input name="deviceId" placeholder="PELUCHE_001" pattern="[A-Za-z0-9_-]{3,40}" required></div><div class="field"><label>Tipo</label><select name="tipo"><option value="basic">Servicio temporizado</option><option value="gachapon">Máquina de peluches / premios</option><option value="arcade">Arcade / créditos</option><option value="premium">Planes múltiples</option></select></div><button class="btn primary" type="submit">Crear módulo</button></form></details>
     <div class="footer">Los cambios de precio y tiempos son consultados automáticamente por la pantalla. Base: ${escaparHtml(PUBLIC_BASE_URL)}</div>
     <script>
       const participantCount=document.getElementById('participant-count');
@@ -3045,6 +3126,32 @@ app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
 app.post("/admin/device/:deviceId/update", (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const d = asegurarDevice(id);
+  if (d.tipo === "gachapon") {
+    const cfg = configuracionGachaponDevice(id);
+    const activo = req.body.activo === "on";
+    d.activo = activo;
+    d.modoMantenimiento = req.body.mantenimiento === "on";
+    cfg.activo = activo;
+    cfg.nombre = String(req.body.nombre || cfg.nombre).trim().slice(0, 60);
+    cfg.titulo = String(req.body.titulo || cfg.titulo).trim().slice(0, 40);
+    cfg.mensaje = String(req.body.mensaje || cfg.mensaje).trim().slice(0, 100);
+    cfg.cantidad_opciones = Math.max(1, Math.min(3, Number(req.body.cantidadOpciones || 1)));
+    cfg.pulso_motor_ms = Math.max(100, Math.min(10000, Number(req.body.pulsoMotorMs || 500)));
+    cfg.pausa_premios_ms = Math.max(0, Math.min(10000, Number(req.body.pausaPremiosMs || 650)));
+    for (let index = 0; index < 3; index++) {
+      const monto = Number(req.body[`monto${index}`]);
+      const plan = cfg.planes[index];
+      plan.id = `G${index + 1}`;
+      plan.creditos = index + 1;
+      plan.nombre = `${index + 1} JUGADA${index ? "S" : ""}`;
+      plan.descripcion = `${index + 1} pulso${index ? "s" : ""} de juego`;
+      plan.giro_ms = cfg.pulso_motor_ms;
+      if (Number.isFinite(monto) && monto > 0) plan.monto = Math.round(monto * 100) / 100;
+      plan.etiqueta = String(req.body[`etiqueta${index}`] || "Elegir y pagar").trim().slice(0, 28);
+    }
+    guardarDatos();
+    return res.redirect(adminDeviceUrl(id));
+  }
   const cfg = configuracionServicioDevice(id);
   const activo = req.body.activo === "on";
   const monto = Number(req.body.monto);
@@ -3359,7 +3466,12 @@ app.post("/admin/device/add", (req, res) => {
 
   if (id && !devices[id]) {
     devices[id] = nuevoDevice(["basic", "premium", "gachapon", "arcade"].includes(tipo) ? tipo : detectarTipoDevice(id));
-    asegurarDevice(id).configuracionServicio.nombre = id.replace(/[_-]+/g, " ");
+    const d = asegurarDevice(id);
+    if (d.tipo === "gachapon") {
+      d.configuracionGachapon.nombre = id.includes("PELUCHE") ? "Máquina de Peluches 1" : id.replace(/[_-]+/g, " ");
+    } else {
+      d.configuracionServicio.nombre = id.replace(/[_-]+/g, " ");
+    }
   }
 
   guardarDatos();
