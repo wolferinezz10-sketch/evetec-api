@@ -136,6 +136,8 @@ let configGlobal = {
     titulo: "GACHAPON",
     mensaje: "Tu sorpresa te espera",
     instruccion: "Toca una opcion",
+    modo_activacion: "tiempo",
+    segundos_por_jugada: 30,
     pulso_motor_ms: 10000,
     pausa_premios_ms: 650,
     planes: [
@@ -520,6 +522,8 @@ function asegurarDevice(deviceId) {
         d.configuracionGachapon.titulo = "ATRAPÁ TU PELUCHE";
         d.configuracionGachapon.mensaje = "Elegí tus jugadas y pagá con QR";
         d.configuracionGachapon.instruccion = "Elegí una opción";
+        d.configuracionGachapon.modo_activacion = "tiempo";
+        d.configuracionGachapon.segundos_por_jugada = 30;
         d.configuracionGachapon.pulso_motor_ms = 500;
         d.configuracionGachapon.pausa_premios_ms = 650;
       }
@@ -536,6 +540,11 @@ function asegurarDevice(deviceId) {
     };
     d.configuracionGachapon.cantidad_opciones = Math.max(1, Math.min(3,
       Number(d.configuracionGachapon.cantidad_opciones || 3)));
+    if (!["tiempo", "pulsos"].includes(d.configuracionGachapon.modo_activacion)) {
+      d.configuracionGachapon.modo_activacion = "tiempo";
+    }
+    d.configuracionGachapon.segundos_por_jugada = Math.max(1, Math.min(600,
+      Number(d.configuracionGachapon.segundos_por_jugada || 30)));
   }
   if (!['AR', 'BR'].includes(d.paisOperacion)) d.paisOperacion = 'AR';
   if (!d.stats) d.stats = statsIniciales();
@@ -880,6 +889,8 @@ function normalizarPedidoPago(body) {
     const plan = buscarPlanGachapon(body, device_id);
     const pulseMs = Math.max(100, Math.min(10000, Number(cfg.pulso_motor_ms || 500)));
     const creditos = Math.max(1, Math.min(3, Number(plan.creditos || body.creditos || 1)));
+    const activationMode = cfg.modo_activacion === "pulsos" ? "pulsos" : "tiempo";
+    const secondsPerPlay = Math.max(1, Math.min(600, Number(cfg.segundos_por_jugada || 30)));
 
     return {
       device_id,
@@ -888,9 +899,13 @@ function normalizarPedidoPago(body) {
       plan_nombre: plan.nombre || `${plan.creditos || 1} CREDITO`,
       origen: "gachapon",
       monto: Number(plan.monto || plan.precio || body.monto || 1000),
-      segundos: Math.max(1, Math.ceil((creditos * pulseMs + Math.max(0, creditos - 1) * Number(cfg.pausa_premios_ms || 650)) / 1000)),
+      segundos: activationMode === "tiempo"
+        ? creditos * secondsPerPlay
+        : Math.max(1, Math.ceil((creditos * pulseMs + Math.max(0, creditos - 1) * Number(cfg.pausa_premios_ms || 650)) / 1000)),
       motor_ms: pulseMs,
       creditos,
+      modo_activacion: activationMode,
+      segundos_por_jugada: secondsPerPlay,
       etiqueta: plan.etiqueta || ""
     };
   }
@@ -950,6 +965,8 @@ app.get("/config/:deviceId", (req, res) => {
       titulo: g.titulo || "GACHAPON",
       instruccion: g.instruccion || "Toca una opcion",
       cantidad_opciones: cantidadOpciones,
+      modo_activacion: g.modo_activacion === "pulsos" ? "pulsos" : "tiempo",
+      segundos_por_jugada: Math.max(1, Math.min(600, Number(g.segundos_por_jugada || 30))),
       pulso_motor_ms: Number(g.pulso_motor_ms || 500),
       pausa_premios_ms: Number(g.pausa_premios_ms || 650),
       giro1_ms: Number(g.planes?.[0]?.giro_ms || 10000),
@@ -1195,6 +1212,8 @@ async function crearPagoMercadoPago(pedido) {
       segundos: pedido.segundos,
       motor_ms: pedido.motor_ms || 0,
       creditos: pedido.creditos || 0,
+      modo_activacion: pedido.modo_activacion || "",
+      segundos_por_jugada: pedido.segundos_por_jugada || 0,
       monto_total: pedido.monto,
       comision_evetec: comision,
       neto_duenio_estimado: netoDuenioEstimado,
@@ -1244,6 +1263,8 @@ async function crearPagoMercadoPago(pedido) {
     segundos: pedido.segundos,
     motor_ms: pedido.motor_ms || 0,
     creditos: pedido.creditos || 0,
+    modo_activacion: pedido.modo_activacion || "",
+    segundos_por_jugada: pedido.segundos_por_jugada || 0,
     comisionEvetec: comision,
     netoDuenioEstimado,
     modoCobro: d.modoCobro,
@@ -1268,7 +1289,9 @@ async function crearPagoMercadoPago(pedido) {
     monto: pedido.monto,
     segundos: pedido.segundos,
     motor_ms: pedido.motor_ms || 0,
-    creditos: pedido.creditos || 0
+    creditos: pedido.creditos || 0,
+    modo_activacion: pedido.modo_activacion || "",
+    segundos_por_jugada: pedido.segundos_por_jugada || 0
   };
 }
 
@@ -1289,6 +1312,8 @@ app.post("/crear-pago", async (req, res) => {
       segundos: pago.segundos,
       motor_ms: pago.motor_ms || 0,
       creditos: pago.creditos || 0,
+      modo_activacion: pago.modo_activacion || "",
+      segundos_por_jugada: pago.segundos_por_jugada || 0,
       tipo: pedido.modoSistema
     });
 
@@ -1734,6 +1759,8 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
       segundos: Math.max(1, Math.min(3600, Number(pagoLocal.segundos || 0))),
       creditos: Math.max(1, Math.min(3, Number(pagoLocal.creditos || 1))),
       motor_ms: Math.max(100, Math.min(10000, Number(pagoLocal.motor_ms || 500))),
+      modo_activacion: pagoLocal.modo_activacion === "pulsos" ? "pulsos" : "tiempo",
+      segundos_por_jugada: Math.max(1, Math.min(600, Number(pagoLocal.segundos_por_jugada || 30))),
       approved_epoch: Math.floor(Date.now() / 1000),
       modo_cobro: pagoLocal.modoCobro || "evetec",
       comision_evetec: Number(pagoLocal.comisionEvetec || 0),
@@ -2377,6 +2404,8 @@ app.get("/admin", (req, res) => {
           <div class="form-grid">
             <div class="field wide"><label>Nombre visible y de la pestaña</label><input name="nombre" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></div>
             <div class="field"><label>Opciones visibles</label><select name="cantidadOpciones">${[1,2,3].map(n => `<option value="${n}" ${Number(cfg.cantidad_opciones || 3) === n ? "selected" : ""}>${n} opción${n > 1 ? "es" : ""}</option>`).join("")}</select></div>
+            <div class="field"><label>Funcionamiento del relé</label><select name="modoActivacion"><option value="tiempo" ${cfg.modo_activacion !== "pulsos" ? "selected" : ""}>Tiempo por jugada + botón START</option><option value="pulsos" ${cfg.modo_activacion === "pulsos" ? "selected" : ""}>Pulsos automáticos para cargar créditos</option></select></div>
+            <div class="field"><label>Segundos encendido por jugada</label><input name="segundosPorJugada" type="number" min="1" max="600" step="1" value="${Number(cfg.segundos_por_jugada || 30)}" required></div>
             <div class="field"><label>Duración de cada pulso (ms)</label><input name="pulsoMotorMs" type="number" min="100" max="10000" step="50" value="${Number(cfg.pulso_motor_ms || 500)}" required></div>
             <div class="field"><label>Pausa entre pulsos (ms)</label><input name="pausaPremiosMs" type="number" min="0" max="10000" step="50" value="${Number(cfg.pausa_premios_ms || 650)}" required></div>
             <div class="field"><label>Título en pantalla</label><input name="titulo" value="${escaparHtml(cfg.titulo || "ATRAPÁ TU PELUCHE")}" maxlength="40"></div>
@@ -2384,7 +2413,7 @@ app.get("/admin", (req, res) => {
           </div>
           <h3>Precios por cantidad de jugadas</h3>
           <div class="plan-grid">${[0,1,2].map(index => { const p = cfg.planes[index]; return `<div class="plan-card"><b>${index + 1} jugada${index ? "s" : ""}</b><label>Precio (ARS)<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(p.monto)}" required></label><label>Texto breve<input name="etiqueta${index}" value="${escaparHtml(p.etiqueta || "Elegir y pagar")}" maxlength="28"></label></div>`; }).join("")}</div>
-          <p class="hint">Cada jugada activa exactamente un pulso. Si dejás una sola opción, la pantalla mostrará únicamente la tarjeta de 1 jugada.</p>
+          <p class="hint"><b>Tiempo por jugada:</b> el pago deja créditos disponibles; cada START consume uno y mantiene el relé encendido durante los segundos indicados. <b>Pulsos:</b> el pago envía automáticamente un pulso por crédito para que la electrónica original administre las partidas.</p>
           <div class="actions"><button class="btn primary" type="submit">Guardar cambios</button></div>
         </form>` : `
         <h2>Configuración del servicio</h2>
@@ -3136,6 +3165,8 @@ app.post("/admin/device/:deviceId/update", (req, res) => {
     cfg.titulo = String(req.body.titulo || cfg.titulo).trim().slice(0, 40);
     cfg.mensaje = String(req.body.mensaje || cfg.mensaje).trim().slice(0, 100);
     cfg.cantidad_opciones = Math.max(1, Math.min(3, Number(req.body.cantidadOpciones || 1)));
+    cfg.modo_activacion = req.body.modoActivacion === "pulsos" ? "pulsos" : "tiempo";
+    cfg.segundos_por_jugada = Math.max(1, Math.min(600, Number(req.body.segundosPorJugada || 30)));
     cfg.pulso_motor_ms = Math.max(100, Math.min(10000, Number(req.body.pulsoMotorMs || 500)));
     cfg.pausa_premios_ms = Math.max(0, Math.min(10000, Number(req.body.pausaPremiosMs || 650)));
     for (let index = 0; index < 3; index++) {
@@ -3144,7 +3175,7 @@ app.post("/admin/device/:deviceId/update", (req, res) => {
       plan.id = `G${index + 1}`;
       plan.creditos = index + 1;
       plan.nombre = `${index + 1} JUGADA${index ? "S" : ""}`;
-      plan.descripcion = `${index + 1} pulso${index ? "s" : ""} de juego`;
+      plan.descripcion = `${index + 1} jugada${index ? "s" : ""}`;
       plan.giro_ms = cfg.pulso_motor_ms;
       if (Number.isFinite(monto) && monto > 0) plan.monto = Math.round(monto * 100) / 100;
       plan.etiqueta = String(req.body[`etiqueta${index}`] || "Elegir y pagar").trim().slice(0, 28);
