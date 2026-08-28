@@ -442,6 +442,7 @@ function cargarDatos() {
 asegurarEstructuraConfig();
 cargarDatos();
 asegurarEstructuraConfig();
+if (deduplicarEventosUso()) guardarDatos();
 asegurarDevice(PROTOTYPE_DEVICE_ID);
 asegurarDevice(PLUSH_DEVICE_ID);
 
@@ -614,6 +615,41 @@ function eventosUsoDevice(deviceId) {
   return Object.values(usageEvents)
     .filter(e => e && e.device_id === id)
     .sort((a, b) => Number(a.approved_epoch || 0) - Number(b.approved_epoch || 0));
+}
+
+function deduplicarEventosUso() {
+  let cambios = 0;
+  const eventos = Object.entries(usageEvents).filter(([, event]) => event && event.device_id);
+  for (const [externalKey, externalEvent] of eventos) {
+    const devicePrefix = `${String(externalEvent.device_id).toUpperCase()}_`;
+    if (!String(externalKey).toUpperCase().startsWith(devicePrefix)) continue;
+    const duplicate = eventos.find(([candidateKey, candidate]) =>
+      /^\d+$/.test(String(candidateKey)) &&
+      candidate.device_id === externalEvent.device_id &&
+      Number(candidate.approved_epoch || 0) === Number(externalEvent.approved_epoch || 0) &&
+      Number(candidate.amount_cents || 0) === Number(externalEvent.amount_cents || 0) &&
+      Number(candidate.sold_seconds || 0) === Number(externalEvent.sold_seconds || 0)
+    );
+    if (!duplicate) continue;
+    const [paymentKey, paymentEvent] = duplicate;
+    usageEvents[externalKey] = {
+      ...paymentEvent,
+      ...externalEvent,
+      event_id: externalKey,
+      payment_id: paymentKey,
+      started_epoch: Math.max(Number(paymentEvent.started_epoch || 0), Number(externalEvent.started_epoch || 0)),
+      finished_epoch: Math.max(Number(paymentEvent.finished_epoch || 0), Number(externalEvent.finished_epoch || 0)),
+      actual_seconds: Math.max(Number(paymentEvent.actual_seconds || 0), Number(externalEvent.actual_seconds || 0)),
+      completed: paymentEvent.completed !== false || externalEvent.completed !== false,
+      mp_fee_cents: Math.max(Number(paymentEvent.mp_fee_cents || 0), Number(externalEvent.mp_fee_cents || 0)),
+      net_received_cents: Math.max(Number(paymentEvent.net_received_cents || 0), Number(externalEvent.net_received_cents || 0)),
+      participants: externalEvent.participants?.length ? externalEvent.participants : (paymentEvent.participants || [])
+    };
+    delete usageEvents[paymentKey];
+    cambios++;
+  }
+  if (cambios) console.log(`LEDGER: ${cambios} registro(s) duplicado(s) consolidados`);
+  return cambios;
 }
 
 function statsDesdeUso(deviceId) {
@@ -1725,10 +1761,13 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
           tiempoMotor: Number(d.stats?.tiempoMotor || 0)
         };
       }
-      const eventId = String(estado.payment_id);
+      // Un pago tiene dos identificadores: nuestra referencia externa y el ID
+      // numérico de Mercado Pago. El equipo conoce la referencia externa, por
+      // lo que esa debe ser la clave canónica en ambos lados para no sumar dos veces.
+      const eventId = String(pagoLocal.external_reference || id);
       usageEvents[eventId] = {
         event_id: eventId,
-        payment_id: eventId,
+        payment_id: String(estado.payment_id || ""),
         device_id: deviceId,
         approved_epoch: Math.floor(Date.now() / 1000),
         started_epoch: 0,
@@ -1754,6 +1793,7 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
       ok: true,
       activate: true,
       status: "approved",
+      event_id: String(pagoLocal.external_reference || id),
       payment_id: estado.payment_id,
       monto: Number(pagoLocal.monto || 0),
       segundos: Math.max(1, Math.min(3600, Number(pagoLocal.segundos || 0))),
