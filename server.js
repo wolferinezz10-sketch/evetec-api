@@ -3,6 +3,7 @@ const cors = require("cors");
 const QRCode = require("qrcode");
 const fs = require("fs");
 const crypto = require("crypto");
+const { Pool } = require("pg");
 
 const app = express();
 
@@ -25,6 +26,10 @@ const MAX_PARTICIPANTS = 8;
 const PARTICIPANT_NUMBERS = Array.from({ length: MAX_PARTICIPANTS }, (_, index) => index + 1);
 
 const DATA_FILE = process.env.DATA_FILE || "evetec-timers-data.json";
+const DATABASE_URL = process.env.DATABASE_URL || "";
+let databasePool = null;
+let databaseReady = false;
+let databaseSaveTimer = null;
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
 const oauthStates = new Map();
 
@@ -396,14 +401,40 @@ function asegurarEstructuraConfig() {
 }
 
 function guardarDatos() {
+  const snapshot = { devices, pagosCreados, usageEvents, configGlobal };
   try {
     fs.writeFileSync(
       DATA_FILE,
-      JSON.stringify({ devices, pagosCreados, usageEvents, configGlobal }, null, 2)
+      JSON.stringify(snapshot, null, 2)
     );
   } catch (err) {
     console.error("Error guardando datos:", err.message);
   }
+  if (databaseReady && databasePool) {
+    clearTimeout(databaseSaveTimer);
+    databaseSaveTimer = setTimeout(async () => {
+      try {
+        await databasePool.query(
+          `INSERT INTO evetec_state (id, payload, updated_at) VALUES ('main', $1::jsonb, NOW())
+           ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+          [JSON.stringify({ devices, pagosCreados, usageEvents, configGlobal })]
+        );
+      } catch (err) {
+        console.error("Error guardando PostgreSQL:", err.message);
+      }
+    }, 250);
+  }
+}
+
+function aplicarSnapshot(data) {
+  if (!data || typeof data !== "object") return;
+  if (data.configGlobal) {
+    configGlobal = { ...configGlobal, ...data.configGlobal };
+    asegurarEstructuraConfig();
+  }
+  if (data.devices) devices = limpiarDevicesMigrados(data.devices);
+  if (data.pagosCreados) pagosCreados = data.pagosCreados;
+  if (data.usageEvents && typeof data.usageEvents === "object") usageEvents = data.usageEvents;
 }
 
 function cargarDatos() {
@@ -412,22 +443,7 @@ function cargarDatos() {
 
     const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
 
-    if (data.configGlobal) {
-      configGlobal = { ...configGlobal, ...data.configGlobal };
-      asegurarEstructuraConfig();
-    }
-
-    if (data.devices) {
-      devices = limpiarDevicesMigrados(data.devices);
-    }
-
-    if (data.pagosCreados) {
-      pagosCreados = data.pagosCreados;
-    }
-
-    if (data.usageEvents && typeof data.usageEvents === "object") {
-      usageEvents = data.usageEvents;
-    }
+    aplicarSnapshot(data);
 
     if (!devices[PROTOTYPE_DEVICE_ID]) {
       devices[PROTOTYPE_DEVICE_ID] = nuevoPrototypeDevice();
@@ -553,6 +569,35 @@ function asegurarDevice(deviceId) {
   if (d.tipo === "arcade" && typeof d.arcadeCredits === "undefined") d.arcadeCredits = 0;
 
   return d;
+}
+
+async function iniciarPersistencia() {
+  if (!DATABASE_URL) {
+    console.warn("Persistencia: archivo local solamente. Configure DATABASE_URL para conservar datos entre despliegues.");
+    return;
+  }
+  try {
+    databasePool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    await databasePool.query(`CREATE TABLE IF NOT EXISTS evetec_state (
+      id TEXT PRIMARY KEY,
+      payload JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    const result = await databasePool.query("SELECT payload FROM evetec_state WHERE id = 'main'");
+    if (result.rows[0]?.payload) {
+      aplicarSnapshot(result.rows[0].payload);
+      asegurarEstructuraConfig();
+      asegurarDevice(PROTOTYPE_DEVICE_ID);
+      asegurarDevice(PLUSH_DEVICE_ID);
+      deduplicarEventosUso();
+      console.log("Datos EVETEC restaurados desde PostgreSQL");
+    }
+    databaseReady = true;
+    guardarDatos();
+  } catch (err) {
+    databaseReady = false;
+    console.error("PostgreSQL no disponible; continúa el respaldo local:", err.message);
+  }
 }
 
 function configuracionServicioDevice(deviceId) {
@@ -1134,6 +1179,16 @@ app.post("/heartbeat", (req, res) => {
 
   d.online = true;
   d.ultimaConexion = new Date().toISOString();
+  d.telemetria = {
+    firmware: String(req.body.firmware || d.telemetria?.firmware || ""),
+    ssid: String(req.body.ssid || d.telemetria?.ssid || "").slice(0, 64),
+    rssi: Number(req.body.rssi ?? d.telemetria?.rssi ?? 0),
+    ip: String(req.body.ip || d.telemetria?.ip || "").slice(0, 48),
+    uptimeSeconds: Number(req.body.uptime_seconds ?? d.telemetria?.uptimeSeconds ?? 0),
+    freeHeap: Number(req.body.free_heap ?? d.telemetria?.freeHeap ?? 0),
+    localSales: Number(req.body.local_sales ?? d.telemetria?.localSales ?? 0),
+    receivedAt: new Date().toISOString()
+  };
 
   guardarDatos();
 
@@ -2569,6 +2624,9 @@ app.get("/admin", (req, res) => {
         <div class="owner-line"><span>Salida</span><b>GPIO 40</b></div>
         <div class="owner-line"><span>Mercado</span><b>${d.paisOperacion === "BR" ? "Brasil" : "Argentina"}</b></div>
         <div class="owner-line"><span>Moneda</span><b>${escaparHtml(monedaDevice(id))}</b></div>
+        <div class="owner-line"><span>Firmware</span><b>${escaparHtml(d.telemetria?.firmware || "Sin informar")}</b></div>
+        <div class="owner-line"><span>WiFi / señal</span><b>${escaparHtml(d.telemetria?.ssid || "-")} ${Number(d.telemetria?.rssi || 0) ? `(${Number(d.telemetria.rssi)} dBm)` : ""}</b></div>
+        <div class="owner-line"><span>Registros locales</span><b>${Number(d.telemetria?.localSales || 0)}</b></div>
         <div class="country-note"><b>PIX / Brasil</b><div class="hint">La plataforma está preparada para separar el mercado por módulo. PIX se habilita al vincular una cuenta Mercado Pago Brasil compatible; una cuenta argentina no puede cobrar PIX directamente.</div></div>
       </aside>
     </section>
@@ -3604,7 +3662,8 @@ app.get("/health", (req, res) => {
       ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
       ownerUserId: d.ownerUserId || null,
       modoCobro: d.modoCobro,
-      comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
+      comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
+      telemetria: d.telemetria || null
     }])
   );
 
@@ -3618,6 +3677,8 @@ app.get("/health", (req, res) => {
     fallbackToken: Boolean(EVETEC_MP_TOKEN),
     adminProtected: Boolean(ADMIN_PASSWORD),
     deviceApiProtected: Boolean(DEVICE_API_KEY),
+    persistence: databaseReady ? "postgresql" : "local-file-ephemeral",
+    databaseConfigured: Boolean(DATABASE_URL),
     devices: deviceSummary
   });
 });
@@ -3645,7 +3706,9 @@ setInterval(() => {
 // START
 // =====================================================
 
-app.listen(PORT, "0.0.0.0", () => {
+async function startServer() {
+  await iniciarPersistencia();
+  app.listen(PORT, "0.0.0.0", () => {
   console.log("=======================================");
   console.log(" SERVER DUAL - PREMIUM + BASIC");
   console.log("=======================================");
@@ -3654,4 +3717,10 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Redirect URI: ${REDIRECT_URI}`);
   console.log(`Admin: ${PUBLIC_BASE_URL}/admin`);
   console.log("=======================================");
+  });
+}
+
+startServer().catch(err => {
+  console.error("No se pudo iniciar el servidor:", err);
+  process.exit(1);
 });
