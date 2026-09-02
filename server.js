@@ -1175,7 +1175,8 @@ app.get("/config/:deviceId", (req, res) => {
       registro_ventas_habilitado: d.registroVentasHabilitado !== false,
       participant_link_pending: d.participantLinkRequest ? {
         participant_id: d.participantLinkRequest.participantId,
-        alias: d.participantLinkRequest.alias
+        alias: d.participantLinkRequest.alias,
+        request_id: d.participantLinkRequest.requestedAt || ""
       } : null,
       comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
       serverTime: new Date().toISOString()
@@ -1212,7 +1213,8 @@ app.get("/config/:deviceId", (req, res) => {
       cantidad_participantes: d.cantidadParticipantes,
       participant_link_pending: d.participantLinkRequest ? {
         participant_id: d.participantLinkRequest.participantId,
-        alias: d.participantLinkRequest.alias
+        alias: d.participantLinkRequest.alias,
+        request_id: d.participantLinkRequest.requestedAt || ""
       } : null,
       mantenimiento: d.modoMantenimiento,
       serverTime: new Date().toISOString()
