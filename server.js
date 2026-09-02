@@ -822,11 +822,17 @@ function obtenerTokenParaCobrar(deviceId) {
     };
   }
 
-  if (
-    (d.modoCobro === "owner_direct" || d.modoCobro === "owner_commission") &&
-    d.ownerLinked &&
-    d.ownerAccessToken
-  ) {
+  const participantOwner = participantePrincipalParaCobro(d);
+  if ((d.modoCobro === "owner_direct" || d.modoCobro === "owner_commission") && participantOwner) {
+    return {
+      token: participantOwner.accessToken,
+      usandoOwner: true,
+      cuentaCobro: participantOwner.id
+    };
+  }
+
+  if ((d.modoCobro === "owner_direct" || d.modoCobro === "owner_commission") &&
+      d.ownerLinked && d.ownerAccessToken) {
     return {
       token: d.ownerAccessToken,
       usandoOwner: true,
@@ -839,6 +845,22 @@ function obtenerTokenParaCobrar(deviceId) {
     usandoOwner: false,
     cuentaCobro: "owner_required"
   };
+}
+
+function participantePrincipalParaCobro(device) {
+  if (!device || !Array.isArray(device.participantes)) return null;
+  return device.participantes.find(participant =>
+    participant.id !== "p1" &&
+    participant.nombre &&
+    Number(participant.porcentaje) > 0 &&
+    participant.linked &&
+    participant.accessToken
+  ) || null;
+}
+
+function cuentaExternaLista(device) {
+  return Boolean(participantePrincipalParaCobro(device) ||
+    (device && device.ownerLinked && device.ownerAccessToken));
 }
 
 function calcularComision(deviceId, monto, usandoOwner) {
@@ -1071,7 +1093,7 @@ app.get("/config/:deviceId", (req, res) => {
         motor_ms: Number(g.pulso_motor_ms || 500),
         descripcion: p.descripcion || ""
       })),
-      ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      ownerLinked: cuentaExternaLista(d),
       evetecAccountReady: Boolean(EVETEC_MP_TOKEN),
       modoCobro: d.modoCobro,
       registro_ventas_habilitado: d.registroVentasHabilitado !== false,
@@ -1099,7 +1121,7 @@ app.get("/config/:deviceId", (req, res) => {
       preinicio_segundos: Number(cfg.preinicioSegundos || 15),
       nombre: cfg.nombre,
       descripcion: cfg.descripcion,
-      ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      ownerLinked: cuentaExternaLista(d),
       evetecAccountReady: Boolean(EVETEC_MP_TOKEN),
       modoCobro: d.modoCobro,
       registro_ventas_habilitado: d.registroVentasHabilitado !== false,
@@ -1144,7 +1166,7 @@ app.get("/config/:deviceId", (req, res) => {
         precio: Number(p.monto || 0),
         descripcion: p.descripcion || ""
       })),
-      ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+      ownerLinked: cuentaExternaLista(d),
       modoCobro: d.modoCobro,
       comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
       serverTime: new Date().toISOString()
@@ -1165,7 +1187,7 @@ app.get("/config/:deviceId", (req, res) => {
     preciosExtra: configGlobal.premium.preciosExtra,
     promoGlobal: configGlobal.premium.promoGlobal.activa ? configGlobal.premium.promoGlobal : null,
     promoGlobalEspecial: configGlobal.premium.promoGlobal.activa ? configGlobal.premium.promoGlobal : null,
-    ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
+    ownerLinked: cuentaExternaLista(d),
     modoCobro: d.modoCobro,
     comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
     mantenimiento: Boolean(d.modoMantenimiento),
@@ -2150,6 +2172,9 @@ app.get("/oauth/callback", async (req, res) => {
 });
 
 app.post("/unlink-owner/:deviceId", requireAdmin, (req, res) => {
+  if (String(req.body.confirmation || "").trim().toUpperCase() !== "DESVINCULAR") {
+    return res.status(400).send("Confirmación requerida. La cuenta no fue modificada.");
+  }
   const d = asegurarDevice(req.params.deviceId);
 
   d.ownerLinked = false;
@@ -2165,11 +2190,12 @@ app.post("/unlink-owner/:deviceId", requireAdmin, (req, res) => {
 
 app.get("/owner-status/:deviceId", (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
+  const participantOwner = participantePrincipalParaCobro(d);
 
   res.json({
     ok: true,
-    linked: Boolean(d.ownerLinked && d.ownerAccessToken),
-    ownerUserId: d.ownerUserId || null,
+    linked: cuentaExternaLista(d),
+    ownerUserId: participantOwner?.userId || d.ownerUserId || null,
     tipo: d.tipo,
     modoCobro: d.modoCobro,
     comisionEvetecPorcentaje: d.comisionEvetecPorcentaje
@@ -2441,6 +2467,14 @@ app.get("/admin", (req, res) => {
   const backupProgress = Math.min(100, (paymentsSinceBackup / 4000) * 100);
   const distributionError = String(req.query.dist_error || "");
   const participantCount = Math.max(1, Math.min(MAX_PARTICIPANTS, Number(d.cantidadParticipantes || 1)));
+  const chargingParticipant = participantePrincipalParaCobro(d);
+  const externalAccountReady = cuentaExternaLista(d);
+  const paymentAccountReady = d.modoCobro === "evetec" ? Boolean(EVETEC_MP_TOKEN) : externalAccountReady;
+  const paymentAccountName = d.modoCobro === "evetec"
+    ? "EVETEC"
+    : (chargingParticipant?.nombre || (d.ownerLinked ? "Cuenta dueña" : "Sin asignar"));
+  const paymentAccountUserId = chargingParticipant?.userId || d.ownerUserId || null;
+  const paymentAccountEmail = chargingParticipant?.email || d.ownerEmail || "";
   const participantRows = d.participantes.map((p, index) => {
     const linked = Boolean(p.linked && p.accessToken);
     const pending = index > 0 && d.participantLinkRequest?.participantId === p.id;
@@ -2588,6 +2622,7 @@ app.get("/admin", (req, res) => {
     <section class="card distribution">
       <h2>Reparto entre coparticipantes</h2>
       <p class="hint">Los porcentajes se congelan en cada venta. La última columna acumula el neto asignado a cada participante.</p>
+      <div class="distribution-note"><b>Las vinculaciones quedan guardadas.</b> Podés cambiar porcentajes, alias y responsable de comisión todas las veces que necesites sin volver a escanear. Una autorización sólo se elimina mediante “Desvincular cuenta”.</div>
       ${distributionError ? `<div class="form-error">${escaparHtml(distributionError)}</div>` : ""}
       <form method="POST" action="/admin/device/${encodeURIComponent(id)}/distribution-update" id="distribution-form">
         <div class="participant-picker"><div><b>Participantes totales, incluyendo EVETEC</b><div class="hint">EVETEC siempre ocupa el primer lugar. Podés configurar hasta ocho participantes por módulo.</div></div><select name="participantCount" id="participant-count">${PARTICIPANT_NUMBERS.map(count => `<option value="${count}" ${count === participantCount ? "selected" : ""}>${count} participante${count > 1 ? "s" : ""}</option>`).join("")}</select></div>
@@ -2607,18 +2642,16 @@ app.get("/admin", (req, res) => {
       </div>
 
       <aside class="card">
-        <h2>Dueño y Mercado Pago</h2>
+        <h2>Cuenta de cobro Mercado Pago</h2>
         <div class="owner">
           <div class="owner-line"><span>Cuenta EVETEC base</span><span class="pill ${EVETEC_MP_TOKEN ? "success" : "warning"}">${EVETEC_MP_TOKEN ? "Lista para cobrar" : "Falta credencial"}</span></div>
-          <div class="owner-line"><span>Estado</span><span class="pill ${d.ownerLinked ? "success" : "warning"}">${d.ownerLinked ? "Vinculada" : "Sin vincular"}</span></div>
-          <div class="owner-line"><span>Usuario MP</span><b>${escaparHtml(d.ownerUserId || "No asignado")}</b></div>
-          <div class="owner-line"><span>Correo</span><b>${escaparHtml(d.ownerEmail || "No informado")}</b></div>
+          <div class="owner-line"><span>Cuenta seleccionada</span><b>${escaparHtml(paymentAccountName)}</b></div>
+          <div class="owner-line"><span>Estado operativo</span><span class="pill ${paymentAccountReady ? "success" : "warning"}">${paymentAccountReady ? "Lista para cobrar" : "Falta vincular"}</span></div>
+          <div class="owner-line"><span>Usuario MP</span><b>${escaparHtml(paymentAccountUserId || "No asignado")}</b></div>
+          <div class="owner-line"><span>Correo</span><b>${escaparHtml(paymentAccountEmail || "No informado")}</b></div>
         </div>
-        <p class="hint">Para asignar o cambiar el dueño, autorizá la cuenta correcta directamente en Mercado Pago.</p>
-        <div class="actions">
-          <a class="btn primary" href="/oauth/link/${encodeURIComponent(id)}">${d.ownerLinked ? "Cambiar cuenta dueña" : "Vincular cuenta dueña"}</a>
-          ${d.ownerLinked ? `<form method="POST" action="/unlink-owner/${encodeURIComponent(id)}"><button class="btn danger" type="submit">Desvincular</button></form>` : ""}
-        </div>
+        <p class="hint">Las cuentas de los coparticipantes se administran en sus respectivas filas. Cambiar el reparto no modifica ninguna autorización.</p>
+        ${!chargingParticipant && d.modoCobro !== "evetec" ? `<div class="actions"><a class="btn primary" href="/oauth/link/${encodeURIComponent(id)}">${d.ownerLinked ? "Cambiar cuenta dueña heredada" : "Vincular cuenta dueña"}</a>${d.ownerLinked ? `<form method="POST" action="/unlink-owner/${encodeURIComponent(id)}" data-owner-unlink><input type="hidden" name="confirmation" value=""><button class="btn danger" type="submit">Desvincular</button></form>` : ""}</div>` : ""}
         <h3>Estado del equipo</h3>
         <div class="owner-line"><span>Última conexión</span><b>${escaparHtml(ultimaConexion)}</b></div>
         <div class="owner-line"><span>Salida</span><b>GPIO 40</b></div>
@@ -2647,7 +2680,8 @@ app.get("/admin", (req, res) => {
       participantCount.addEventListener('change',()=>{syncParticipantRows();if(autoDistribution.checked)equalizePercentages()});document.querySelectorAll('input[name^="participant_name_"]').forEach(input=>input.addEventListener('input',syncParticipantRows));document.querySelectorAll('input[name^="participant_pct_"]').forEach(input=>input.addEventListener('input',()=>rebalanceFrom(input)));autoDistribution.addEventListener('change',()=>{if(autoDistribution.checked)equalizePercentages()});syncParticipantRows();
       document.querySelectorAll('[data-participant-link]').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[data-participant-row]');const alias=row.querySelector('input[name^="participant_name_"]').value.trim();if(!alias){alert('Escribí primero el alias del participante.');return}button.disabled=true;button.textContent='Enviando...';try{const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantLink,alias})});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo generar el QR');location.reload()}catch(error){button.disabled=false;button.textContent='Generar QR';alert(error.message)}}));
       document.querySelectorAll('[data-participant-cancel]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Cancelar este QR? Dejará de mostrarse en el módulo y ya no podrá completar la vinculación.'))return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantCancel})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo cancelar el QR.')}}));
-      document.querySelectorAll('[data-participant-unlink]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Desvincular esta cuenta de Mercado Pago? El módulo dejará de usarla para nuevos cobros.'))return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantUnlink})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo desvincular la cuenta.')}}));
+      document.querySelectorAll('[data-participant-unlink]').forEach(button=>button.addEventListener('click',async()=>{const confirmation=prompt('Esta acción borra la autorización guardada. Escribí DESVINCULAR para confirmar:');if(String(confirmation||'').trim().toUpperCase()!=='DESVINCULAR')return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantUnlink,confirmation:'DESVINCULAR'})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo desvincular la cuenta.')}}));
+      document.querySelectorAll('[data-owner-unlink]').forEach(form=>form.addEventListener('submit',event=>{const confirmation=prompt('Esta acción borra la autorización guardada. Escribí DESVINCULAR para confirmar:');if(String(confirmation||'').trim().toUpperCase()!=='DESVINCULAR'){event.preventDefault();return}form.querySelector('input[name="confirmation"]').value='DESVINCULAR'}));
       setInterval(async()=>{try{const r=await fetch('/admin/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp);document.getElementById('mp-rate').textContent=Number(s.tasaMpEfectiva||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%'}catch(_){ }},5000);
     </script>
   </main></body></html>`);
@@ -3198,6 +3232,9 @@ app.post("/admin/device/:deviceId/participant-link-cancel", (req, res) => {
 app.post("/admin/device/:deviceId/participant-unlink", (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const participantId = String(req.body.participantId || "").trim().toLowerCase();
+  if (String(req.body.confirmation || "").trim().toUpperCase() !== "DESVINCULAR") {
+    return res.status(400).json({ ok: false, error: "Confirmación requerida. La cuenta permanece vinculada." });
+  }
   const d = asegurarDevice(id);
   const participant = d.participantes.find(p => p.id === participantId);
   if (!participant || participantId === "p1") return res.status(400).json({ ok: false, error: "Participante inválido" });
@@ -3659,8 +3696,8 @@ app.get("/health", (req, res) => {
       online: Boolean(d.online),
       modoMantenimiento: Boolean(d.modoMantenimiento),
       ultimaConexion: d.ultimaConexion || null,
-      ownerLinked: Boolean(d.ownerLinked && d.ownerAccessToken),
-      ownerUserId: d.ownerUserId || null,
+      ownerLinked: cuentaExternaLista(d),
+      ownerUserId: participantePrincipalParaCobro(d)?.userId || d.ownerUserId || null,
       modoCobro: d.modoCobro,
       comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
       telemetria: d.telemetria || null
