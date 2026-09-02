@@ -514,9 +514,9 @@ function asegurarDevice(deviceId) {
   });
   const participantesActivos = d.participantes.filter(p => p.nombre && Number(p.porcentaje) > 0).length;
   d.cantidadParticipantes = Math.max(1, Math.min(MAX_PARTICIPANTS, Number(d.cantidadParticipantes || participantesActivos || 1)));
-  if (!["proportional", ...PARTICIPANT_NUMBERS.map(index => `p${index}`)].includes(d.pagadorComisionMp)) {
-    d.pagadorComisionMp = "proportional";
-  }
+  // Regla comercial global: la comisión de Mercado Pago siempre se reparte
+  // en la misma proporción que la participación de cada integrante.
+  d.pagadorComisionMp = "proportional";
   if (!Number.isFinite(Number(configGlobal.gachapon.cantidad_opciones))) {
     configGlobal.gachapon.cantidad_opciones = 3;
   }
@@ -636,22 +636,15 @@ function calcularDistribucion(deviceId, monto, comisionMp) {
   const grossDifference = grossCents - result.reduce((sum, p) => sum + p.monto_cents, 0);
   result[result.length - 1].monto_cents += grossDifference;
 
-  if (d.pagadorComisionMp === "proportional") {
-    let assignedFee = 0;
-    result.forEach((p, index) => {
-      const participantFee = index === result.length - 1
-        ? feeCents - assignedFee
-        : Math.round(feeCents * p.porcentaje / 100);
-      p.comision_mp_cents = participantFee;
-      p.neto_cents = p.monto_cents - participantFee;
-      assignedFee += participantFee;
-    });
-  } else {
-    result.forEach(p => {
-      p.comision_mp_cents = p.id === d.pagadorComisionMp ? feeCents : 0;
-      p.neto_cents = p.monto_cents - p.comision_mp_cents;
-    });
-  }
+  let assignedFee = 0;
+  result.forEach((p, index) => {
+    const participantFee = index === result.length - 1
+      ? feeCents - assignedFee
+      : Math.round(feeCents * p.porcentaje / 100);
+    p.comision_mp_cents = participantFee;
+    p.neto_cents = p.monto_cents - participantFee;
+    assignedFee += participantFee;
+  });
   return result;
 }
 
@@ -2595,10 +2588,11 @@ app.get("/admin", (req, res) => {
         <div class="participant-account">${accountControls}</div>
       </div>`;
   }).join("");
-  const feePayerOptions = [
-    `<option value="proportional" ${d.pagadorComisionMp === "proportional" ? "selected" : ""}>Proporcional entre todos</option>`,
-    ...d.participantes.map((p, index) => `<option value="p${index + 1}" ${index >= participantCount ? "hidden" : ""} ${d.pagadorComisionMp === `p${index + 1}` ? "selected" : ""}>${escaparHtml(p.nombre || `Coparticipante ${index + 1}`)}</option>`)
-  ].join("");
+  const activeParticipantStats = d.participantes
+    .slice(0, participantCount)
+    .filter(participant => participant.nombre && Number(participant.porcentaje) > 0);
+  const participantStatCards = activeParticipantStats.map(participant => `
+      <div class="card stat"><span class="label">Ganancia ${escaparHtml(participant.nombre)}</span><b data-participant-total="${escaparHtml(participant.id)}">$${formatoDinero(Number(stats.participantTotals?.[participant.id] || 0))}</b><small>${Number(participant.porcentaje).toLocaleString("es-AR", { maximumFractionDigits: 2 })}% · comisión MP proporcional</small></div>`).join("");
   const mpEffectiveRate = Number(stats.totalRecaudado || 0) > 0
     ? Number(stats.comisionesMp || 0) * 100 / Number(stats.totalRecaudado || 0)
     : 0;
@@ -2675,7 +2669,7 @@ app.get("/admin", (req, res) => {
       main{width:min(1120px,calc(100% - 32px));margin:auto;padding:34px 0 60px}.top{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:24px}
       .brand{font-size:13px;letter-spacing:.22em;color:var(--cyan);font-weight:800}.top h1{margin:7px 0 5px;font-size:clamp(27px,4vw,42px)}.sub,.hint{color:var(--muted)}
       .status{display:flex;align-items:center;gap:9px;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:10px 15px;font-weight:700}.dot{width:9px;height:9px;border-radius:50%;background:${d.online ? "var(--green)" : "var(--red)"};box-shadow:0 0 12px currentColor}
-      .stats,.columns{display:grid;gap:16px}.stats{grid-template-columns:repeat(4,1fr);margin-bottom:16px}.columns{grid-template-columns:1.25fr .75fr}.card{background:linear-gradient(145deg,var(--panel),#0c1826);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 16px 45px #0004}.stat b{display:block;font-size:25px;margin-top:8px}.label{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700}
+      .stats,.columns{display:grid;gap:16px}.stats{grid-template-columns:repeat(4,1fr);margin-bottom:16px}.columns{grid-template-columns:1.25fr .75fr}.card{background:linear-gradient(145deg,var(--panel),#0c1826);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 16px 45px #0004}.stat b{display:block;font-size:25px;margin-top:8px}.stat small{display:block;margin-top:8px;color:var(--muted);font-size:11px}.label{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700}
       h2{margin:0 0 18px;font-size:20px}h3{margin:25px 0 12px;color:var(--cyan);font-size:14px;text-transform:uppercase;letter-spacing:.08em}.form-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:15px}.field{display:flex;flex-direction:column;gap:7px}.wide{grid-column:1/-1}label{font-weight:650}input,select{width:100%;background:#091522;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:11px 12px;font:inherit;outline:none}input:focus,select:focus{border-color:var(--cyan)}
       .switches{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px}.check{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}.check input{width:auto;margin:0}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:20px}.btn{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:10px;padding:11px 15px;text-decoration:none;font-weight:800;cursor:pointer}.primary{background:var(--cyan);color:#03141a}.secondary{background:#20344a;color:var(--text);border:1px solid #34506d}.danger{background:#421d29;color:#ffb3bc;border:1px solid #7b3041}
       .owner{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}.owner-line{display:flex;justify-content:space-between;gap:12px;margin:8px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800}.success{background:#123d2d;color:#70f0ad}.muted{background:#293746;color:#b9c7d5}.warning{background:#493b18;color:#ffe08a}
@@ -2712,8 +2706,7 @@ app.get("/admin", (req, res) => {
       <div class="card stat"><span class="label">Pagos aprobados</span><b>${stats.pagosAprobados || 0}</b></div>
       <div class="card stat"><span class="label">Tiempo vendido</span><b>${formatoTiempo(stats.segundosVendidos)}</b></div>
       <div class="card stat"><span class="label">Uso real</span><b>${formatoTiempo(stats.tiempoMotor)}</b></div>
-      <div class="card stat"><span class="label">Ganancia EVETEC</span><b>$${formatoDinero(stats.gananciaEvetec)}</b></div>
-      <div class="card stat"><span class="label">Ganancia dueño</span><b>$${formatoDinero(stats.gananciaDuenio)}</b></div>
+      ${participantStatCards}
       <div class="card stat"><span class="label">Comisión MP real</span><b id="mp-fees">$${formatoDinero(stats.comisionesMp)}</b></div>
       <div class="card stat"><span class="label">Tasa efectiva MP</span><b class="mp-rate" id="mp-rate">${mpEffectiveRate.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%</b></div>
       <div class="card stat"><span class="label">Neto tras MP</span><b id="net-after-mp">$${formatoDinero(stats.netoDespuesMp)}</b></div>
@@ -2729,7 +2722,7 @@ app.get("/admin", (req, res) => {
         <label class="check auto-share"><input type="checkbox" id="auto-distribution" checked> Ajustar automáticamente los demás porcentajes para completar 100% <span class="hint">Desmarcá para redondear o editar todo manualmente.</span></label>
         <div class="participant-head"><span>#</span><span>Alias</span><span>Participación</span><span>Neto acumulado</span><span>Cuenta Mercado Pago</span></div>
         ${participantRows}
-        <div class="form-grid" style="margin-top:18px"><div class="field wide"><label>Quién absorbe la comisión de Mercado Pago</label><select name="mpFeePayer" id="mp-fee-payer">${feePayerOptions}</select></div></div>
+        <div class="distribution-note"><b>Comisión Mercado Pago: reparto proporcional fijo.</b> Cada participante absorbe la comisión según su porcentaje; esta regla no puede cambiarse individualmente.</div>
         <div class="hint" style="margin-top:12px">La cuenta de cobro y la participación EVETEC se determinan automáticamente con los porcentajes configurados arriba.</div>
         <div class="distribution-note">Este reparto es una liquidación contable. Mercado Pago estándar transfiere automáticamente solo entre vendedor y marketplace; los pagos 1:N requieren habilitación comercial especial.</div>
         <div class="actions"><button class="btn primary" type="submit">Guardar reparto</button></div>
@@ -2767,12 +2760,11 @@ app.get("/admin", (req, res) => {
     <section class="card" style="margin-top:16px"><h2>Servicios confirmados por el equipo</h2><p class="hint">La tasa mostrada es el porcentaje real descontado en cada transacción, no una estimación.</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Pago</th><th>Monto</th><th>Comisión MP</th><th>% MP real</th><th>Neto MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
     <details class="card module-add"><summary>+ Incorporar otro módulo</summary><form class="new-device-form" method="POST" action="/admin/device/add"><div class="field"><label>Identificador único</label><input name="deviceId" placeholder="PELUCHE_001" pattern="[A-Za-z0-9_-]{3,40}" required></div><div class="field"><label>Tipo</label><select name="tipo"><option value="basic">Servicio temporizado</option><option value="gachapon">Máquina de peluches / premios</option><option value="arcade">Arcade / créditos</option><option value="premium">Planes múltiples</option></select></div><button class="btn primary" type="submit">Crear módulo</button></form></details>
     <div class="footer">Los cambios de precio y tiempos son consultados automáticamente por la pantalla. Base: ${escaparHtml(PUBLIC_BASE_URL)}</div>
-    <script>
+      <script>
       const participantCount=document.getElementById('participant-count');
-      const feePayer=document.getElementById('mp-fee-payer');
       const autoDistribution=document.getElementById('auto-distribution');
       let balancingPercentages=false;
-      function syncParticipantRows(){const count=Number(participantCount.value);document.querySelectorAll('[data-participant-row]').forEach(row=>{const number=Number(row.dataset.participantRow);const visible=number<=count;row.hidden=!visible;row.querySelectorAll('input').forEach(input=>input.disabled=!visible);const option=feePayer.querySelector('option[value="p'+number+'"]');const name=row.querySelector('input[name^="participant_name_"]')?.value.trim();if(option){option.hidden=!visible;option.textContent=name||'Coparticipante '+number}});if(feePayer.selectedOptions[0]?.hidden)feePayer.value='proportional'}
+      function syncParticipantRows(){const count=Number(participantCount.value);document.querySelectorAll('[data-participant-row]').forEach(row=>{const number=Number(row.dataset.participantRow);const visible=number<=count;row.hidden=!visible;row.querySelectorAll('input').forEach(input=>input.disabled=!visible)})}
       function activePercentageInputs(){return [...document.querySelectorAll('input[name^="participant_pct_"]')].filter(input=>!input.disabled)}
       function percentageText(value){return (Math.round(value*100)/100).toFixed(2).replace(/\\.00$/,'')}
       function equalizePercentages(){const inputs=activePercentageInputs();if(!inputs.length)return;balancingPercentages=true;const base=Math.floor(10000/inputs.length)/100;let used=0;inputs.forEach((input,index)=>{const value=index===inputs.length-1?100-used:base;input.value=percentageText(value);used=Math.round((used+value)*100)/100});balancingPercentages=false}
@@ -2783,7 +2775,7 @@ app.get("/admin", (req, res) => {
       document.querySelectorAll('[data-participant-share]').forEach(button=>button.addEventListener('click',async()=>{const url=button.dataset.participantShare;try{if(navigator.share){await navigator.share({title:'Vinculación Mercado Pago',text:'Abrí este enlace para vincular tu cuenta al equipo ${encodeURIComponent(id)}.',url});return}await navigator.clipboard.writeText(url);button.textContent='Enlace copiado';setTimeout(()=>button.textContent='Copiar / enviar enlace',1800)}catch(error){if(error&&error.name==='AbortError')return;prompt('Copiá y enviá este enlace al participante:',url)}}));
       document.querySelectorAll('[data-participant-unlink]').forEach(button=>button.addEventListener('click',async()=>{const confirmation=prompt('Esta acción borra la autorización guardada. Escribí DESVINCULAR para confirmar:');if(String(confirmation||'').trim().toUpperCase()!=='DESVINCULAR')return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantUnlink,confirmation:'DESVINCULAR'})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo desvincular la cuenta.')}}));
       document.querySelectorAll('[data-owner-unlink]').forEach(form=>form.addEventListener('submit',event=>{const confirmation=prompt('Esta acción borra la autorización guardada. Escribí DESVINCULAR para confirmar:');if(String(confirmation||'').trim().toUpperCase()!=='DESVINCULAR'){event.preventDefault();return}form.querySelector('input[name="confirmation"]').value='DESVINCULAR'}));
-      setInterval(async()=>{try{const r=await fetch('/admin/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp);document.getElementById('mp-rate').textContent=Number(s.tasaMpEfectiva||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%'}catch(_){ }},5000);
+      setInterval(async()=>{try{const r=await fetch('/admin/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp);document.getElementById('mp-rate').textContent=Number(s.tasaMpEfectiva||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';document.querySelectorAll('[data-participant-total]').forEach(element=>{element.textContent=money((s.participantTotals||{})[element.dataset.participantTotal]||0)})}catch(_){ }},5000);
     </script>
   </main></body></html>`);
 });
@@ -3373,14 +3365,10 @@ app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
   if (selected.some(p => !p.nombre)) error = "Completá el nombre de todos los coparticipantes elegidos.";
   else if (!active.length) error = "Al menos un participante debe tener un porcentaje mayor a cero.";
   else if (Math.abs(total - 100) > 0.001) error = "Los participantes activos deben sumar exactamente 100%.";
-  const feePayer = String(req.body.mpFeePayer || "proportional");
-  if (!error && feePayer !== "proportional" && !active.some(p => p.id === feePayer)) {
-    error = "El responsable de la comisión debe ser un participante activo.";
-  }
   if (error) return res.redirect(adminDeviceUrl(id, `&dist_error=${encodeURIComponent(error)}`));
   d.cantidadParticipantes = count;
   d.participantes = participants;
-  d.pagadorComisionMp = feePayer;
+  d.pagadorComisionMp = "proportional";
   const evetecPercentage = Math.max(0, Math.min(100, Number(participants[0]?.porcentaje || 0)));
   d.comisionEvetecPorcentaje = evetecPercentage;
   d.modoCobro = evetecPercentage >= 99.999
@@ -3519,12 +3507,8 @@ app.post("/admin/prototype/distribution-update", (req, res) => {
   if (participants.some(p => (!p.nombre && p.porcentaje > 0) || (p.nombre && p.porcentaje <= 0))) {
     return res.redirect(`/admin?dist_error=${encodeURIComponent("Cada participante debe tener nombre y un porcentaje mayor a cero.")}`);
   }
-  const feePayer = String(req.body.mpFeePayer || "proportional");
-  if (feePayer !== "proportional" && !active.some(p => p.id === feePayer)) {
-    return res.redirect(`/admin?dist_error=${encodeURIComponent("El responsable de la comisión debe ser un participante activo.")}`);
-  }
   d.participantes = participants;
-  d.pagadorComisionMp = feePayer;
+  d.pagadorComisionMp = "proportional";
   guardarDatos();
   res.redirect("/admin");
 });
