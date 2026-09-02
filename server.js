@@ -817,6 +817,7 @@ function obtenerTokenParaCobrar(deviceId) {
   if (d.modoCobro === "evetec") {
     return {
       token: EVETEC_MP_TOKEN,
+      refreshToken: null,
       usandoOwner: false,
       cuentaCobro: "evetec"
     };
@@ -826,8 +827,10 @@ function obtenerTokenParaCobrar(deviceId) {
   if ((d.modoCobro === "owner_direct" || d.modoCobro === "owner_commission") && participantOwner) {
     return {
       token: participantOwner.accessToken,
+      refreshToken: participantOwner.refreshToken || null,
       usandoOwner: true,
-      cuentaCobro: participantOwner.id
+      cuentaCobro: participantOwner.id,
+      participantId: participantOwner.id
     };
   }
 
@@ -835,16 +838,89 @@ function obtenerTokenParaCobrar(deviceId) {
       d.ownerLinked && d.ownerAccessToken) {
     return {
       token: d.ownerAccessToken,
+      refreshToken: d.ownerRefreshToken || null,
       usandoOwner: true,
-      cuentaCobro: "owner"
+      cuentaCobro: "owner",
+      participantId: null
     };
   }
 
   return {
     token: null,
+    refreshToken: null,
     usandoOwner: false,
     cuentaCobro: "owner_required"
   };
+}
+
+const mpRefreshInFlight = new Map();
+
+async function renovarCredencialMercadoPago(deviceId, credential) {
+  if (!credential?.refreshToken || !MP_CLIENT_ID || !MP_CLIENT_SECRET) return null;
+  const id = String(deviceId || "").trim().toUpperCase();
+  const refreshKey = `${id}:${credential.cuentaCobro || "owner"}`;
+  if (mpRefreshInFlight.has(refreshKey)) return mpRefreshInFlight.get(refreshKey);
+
+  const refreshPromise = (async () => {
+    const d = asegurarDevice(id);
+    const target = credential.participantId
+      ? d.participantes.find(participant => participant.id === credential.participantId)
+      : d;
+    const currentRefreshToken = credential.participantId ? target?.refreshToken : d.ownerRefreshToken;
+    if (!target || !currentRefreshToken) return null;
+
+    const response = await fetch("https://api.mercadopago.com/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: MP_CLIENT_ID,
+        client_secret: MP_CLIENT_SECRET,
+        grant_type: "refresh_token",
+        refresh_token: currentRefreshToken
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.access_token) {
+      console.error("No se pudo renovar OAuth Mercado Pago:", response.status, data.message || data.error || "respuesta inválida");
+      return null;
+    }
+
+    if (credential.participantId) {
+      target.accessToken = data.access_token;
+      target.refreshToken = data.refresh_token || currentRefreshToken;
+      target.accessTokenExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
+      target.linked = true;
+    } else {
+      d.ownerAccessToken = data.access_token;
+      d.ownerRefreshToken = data.refresh_token || currentRefreshToken;
+      d.ownerAccessTokenExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
+      d.ownerLinked = true;
+    }
+    guardarDatos();
+    return data.access_token;
+  })().finally(() => mpRefreshInFlight.delete(refreshKey));
+
+  mpRefreshInFlight.set(refreshKey, refreshPromise);
+  return refreshPromise;
+}
+
+async function fetchMercadoPagoAutorizado(deviceId, url, options, credential) {
+  const currentCredential = credential || obtenerTokenParaCobrar(deviceId);
+  const request = token => fetch(url, {
+    ...options,
+    headers: {
+      ...(options?.headers || {}),
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  let response = await request(currentCredential.token);
+  if (response.status !== 401 || !currentCredential.refreshToken) return response;
+
+  const renewedToken = await renovarCredencialMercadoPago(deviceId, currentCredential);
+  if (!renewedToken) return response;
+  response = await request(renewedToken);
+  return response;
 }
 
 function participantePrincipalParaCobro(device) {
@@ -1287,7 +1363,8 @@ async function crearPagoMercadoPago(pedido) {
     throw new Error(operativo.mensaje);
   }
 
-  const { token, usandoOwner } = obtenerTokenParaCobrar(pedido.device_id);
+  const credential = obtenerTokenParaCobrar(pedido.device_id);
+  const { token, usandoOwner } = credential;
 
   if (!token) {
     throw new Error("Falta token Mercado Pago");
@@ -1342,14 +1419,13 @@ async function crearPagoMercadoPago(pedido) {
     body.marketplace_fee = comision;
   }
 
-  const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
+  const r = await fetchMercadoPagoAutorizado(pedido.device_id, "https://api.mercadopago.com/checkout/preferences", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body)
-  });
+  }, credential);
 
   const data = await r.json();
 
@@ -1603,9 +1679,10 @@ async function buscarEstadoMercadoPago(id) {
   const pagoLocal = pagosCreados[id];
   const deviceId = pagoLocal?.device_id;
 
-  const { token } = deviceId
+  const credential = deviceId
     ? obtenerTokenParaCobrar(deviceId)
-    : { token: EVETEC_MP_TOKEN };
+    : { token: EVETEC_MP_TOKEN, refreshToken: null };
+  const { token } = credential;
 
   if (!token) {
     return {
@@ -1626,11 +1703,9 @@ async function buscarEstadoMercadoPago(id) {
       `?external_reference=${encodeURIComponent(externalRef)}` +
       `&sort=date_created&criteria=desc`;
 
-    const r = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
-    });
+    const r = deviceId
+      ? await fetchMercadoPagoAutorizado(deviceId, url, {}, credential)
+      : await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
 
     const data = await r.json();
 
@@ -2045,23 +2120,11 @@ app.get("/oauth/participant-link/:deviceId/:participantId", (req, res) => {
       return res.status(410).json({ ok: false, error: "vinculacion_cancelada", qr_size: 0, qr_matrix: "" });
     }
     if (!MP_CLIENT_ID) return res.status(503).json({ ok: false, error: "Falta MP_CLIENT_ID" });
-
-    invalidarOauthParticipante(deviceId, participantId);
-    const stateToken = crypto.randomBytes(24).toString("hex");
-    oauthStates.set(stateToken, {
-      deviceId,
-      participantId,
-      expiresAt: Date.now() + 10 * 60 * 1000
-    });
-    for (const [key, value] of oauthStates) {
-      if (value.expiresAt < Date.now()) oauthStates.delete(key);
+    if (!d.participantLinkRequest.shareToken) {
+      d.participantLinkRequest.shareToken = crypto.randomBytes(24).toString("hex");
+      guardarDatos();
     }
-    const url =
-      "https://auth.mercadopago.com.ar/authorization" +
-      `?response_type=code` +
-      `&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
-      `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-      `&state=${encodeURIComponent(stateToken)}`;
+    const url = `${PUBLIC_BASE_URL}/vincular/${encodeURIComponent(deviceId)}/${encodeURIComponent(participantId)}/${encodeURIComponent(d.participantLinkRequest.shareToken)}`;
     const qr = generarQRMatrix(url);
     res.json({
       ok: true,
@@ -2074,6 +2137,35 @@ app.get("/oauth/participant-link/:deviceId/:participantId", (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+app.get("/vincular/:deviceId/:participantId/:shareToken", (req, res) => {
+  const deviceId = String(req.params.deviceId || "").trim().toUpperCase();
+  const participantId = String(req.params.participantId || "").trim().toLowerCase();
+  const shareToken = String(req.params.shareToken || "").trim();
+  const d = asegurarDevice(deviceId);
+  const request = d.participantLinkRequest;
+  const valid = request?.participantId === participantId &&
+    shareToken.length >= 32 &&
+    request.shareToken === shareToken;
+  if (!valid) {
+    return res.status(410).send("<h2>Vinculación no disponible</h2><p>El enlace fue cancelado, reemplazado o ya se utilizó.</p>");
+  }
+  if (!MP_CLIENT_ID) return res.status(503).send("<h2>Vinculación temporalmente no disponible</h2>");
+
+  invalidarOauthParticipante(deviceId, participantId);
+  const stateToken = crypto.randomBytes(24).toString("hex");
+  oauthStates.set(stateToken, { deviceId, participantId, expiresAt: Date.now() + 10 * 60 * 1000 });
+  for (const [key, value] of oauthStates) {
+    if (value.expiresAt < Date.now()) oauthStates.delete(key);
+  }
+  const authorizationUrl =
+    "https://auth.mercadopago.com.ar/authorization" +
+    `?response_type=code` +
+    `&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
+    `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+    `&state=${encodeURIComponent(stateToken)}`;
+  res.redirect(authorizationUrl);
 });
 
 app.get("/oauth/callback", async (req, res) => {
@@ -2127,6 +2219,7 @@ app.get("/oauth/callback", async (req, res) => {
       if (!participant || participantId === "p1") throw new Error("Participante inválido");
       participant.accessToken = data.access_token;
       participant.refreshToken = data.refresh_token || null;
+      participant.accessTokenExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
       participant.userId = data.user_id || null;
       participant.linked = true;
       linkedName = participant.nombre || participantId;
@@ -2134,6 +2227,7 @@ app.get("/oauth/callback", async (req, res) => {
     } else {
       d.ownerAccessToken = data.access_token;
       d.ownerRefreshToken = data.refresh_token || null;
+      d.ownerAccessTokenExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
       d.ownerUserId = data.user_id || null;
       d.ownerLinked = true;
     }
@@ -2478,12 +2572,16 @@ app.get("/admin", (req, res) => {
   const participantRows = d.participantes.map((p, index) => {
     const linked = Boolean(p.linked && p.accessToken);
     const pending = index > 0 && d.participantLinkRequest?.participantId === p.id;
+    const invitationUrl = pending && d.participantLinkRequest?.shareToken
+      ? `${PUBLIC_BASE_URL}/vincular/${encodeURIComponent(id)}/${encodeURIComponent(p.id)}/${encodeURIComponent(d.participantLinkRequest.shareToken)}`
+      : "";
     const accountControls = index === 0
       ? `<span class="pill ${EVETEC_MP_TOKEN ? "success" : "warning"}">${EVETEC_MP_TOKEN ? "Cuenta base lista" : "Falta credencial"}</span>`
       : `${pending
           ? `<span class="pill warning">QR pendiente: ${escaparHtml(d.participantLinkRequest.alias || p.nombre || p.id)}</span>`
           : `<span class="pill ${linked ? "success" : "muted"}">${linked ? "Cuenta vinculada" : "Sin vincular"}</span>`}
         <button class="mini-btn" type="button" data-participant-link="${p.id}">${pending ? "Reemplazar QR" : (linked ? "Cambiar cuenta" : "Generar QR")}</button>
+        ${pending && invitationUrl ? `<button class="mini-btn" type="button" data-participant-share="${escaparHtml(invitationUrl)}">Copiar / enviar enlace</button>` : ""}
         ${pending ? `<button class="mini-btn danger-mini" type="button" data-participant-cancel="${p.id}">Cancelar QR</button>` : ""}
         ${linked ? `<button class="mini-btn danger-mini" type="button" data-participant-unlink="${p.id}">Desvincular cuenta</button>` : ""}`;
     return `
@@ -2680,6 +2778,7 @@ app.get("/admin", (req, res) => {
       participantCount.addEventListener('change',()=>{syncParticipantRows();if(autoDistribution.checked)equalizePercentages()});document.querySelectorAll('input[name^="participant_name_"]').forEach(input=>input.addEventListener('input',syncParticipantRows));document.querySelectorAll('input[name^="participant_pct_"]').forEach(input=>input.addEventListener('input',()=>rebalanceFrom(input)));autoDistribution.addEventListener('change',()=>{if(autoDistribution.checked)equalizePercentages()});syncParticipantRows();
       document.querySelectorAll('[data-participant-link]').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[data-participant-row]');const alias=row.querySelector('input[name^="participant_name_"]').value.trim();if(!alias){alert('Escribí primero el alias del participante.');return}button.disabled=true;button.textContent='Enviando...';try{const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantLink,alias})});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo generar el QR');location.reload()}catch(error){button.disabled=false;button.textContent='Generar QR';alert(error.message)}}));
       document.querySelectorAll('[data-participant-cancel]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('¿Cancelar este QR? Dejará de mostrarse en el módulo y ya no podrá completar la vinculación.'))return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantCancel})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo cancelar el QR.')}}));
+      document.querySelectorAll('[data-participant-share]').forEach(button=>button.addEventListener('click',async()=>{const url=button.dataset.participantShare;try{if(navigator.share){await navigator.share({title:'Vinculación Mercado Pago',text:'Abrí este enlace para vincular tu cuenta al equipo ${encodeURIComponent(id)}.',url});return}await navigator.clipboard.writeText(url);button.textContent='Enlace copiado';setTimeout(()=>button.textContent='Copiar / enviar enlace',1800)}catch(error){if(error&&error.name==='AbortError')return;prompt('Copiá y enviá este enlace al participante:',url)}}));
       document.querySelectorAll('[data-participant-unlink]').forEach(button=>button.addEventListener('click',async()=>{const confirmation=prompt('Esta acción borra la autorización guardada. Escribí DESVINCULAR para confirmar:');if(String(confirmation||'').trim().toUpperCase()!=='DESVINCULAR')return;button.disabled=true;const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:button.dataset.participantUnlink,confirmation:'DESVINCULAR'})});const data=await response.json().catch(()=>({}));if(response.ok&&data.ok)location.reload();else{button.disabled=false;alert(data.error||'No se pudo desvincular la cuenta.')}}));
       document.querySelectorAll('[data-owner-unlink]').forEach(form=>form.addEventListener('submit',event=>{const confirmation=prompt('Esta acción borra la autorización guardada. Escribí DESVINCULAR para confirmar:');if(String(confirmation||'').trim().toUpperCase()!=='DESVINCULAR'){event.preventDefault();return}form.querySelector('input[name="confirmation"]').value='DESVINCULAR'}));
       setInterval(async()=>{try{const r=await fetch('/admin/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp);document.getElementById('mp-rate').textContent=Number(s.tasaMpEfectiva||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%'}catch(_){ }},5000);
@@ -3200,10 +3299,12 @@ app.post("/admin/device/:deviceId/participant-link-request", (req, res) => {
   d.participantLinkRequest = {
     participantId,
     alias,
-    requestedAt: new Date().toISOString()
+    requestedAt: new Date().toISOString(),
+    shareToken: crypto.randomBytes(24).toString("hex")
   };
   guardarDatos();
-  res.json({ ok: true, participant_id: participantId, alias, message: "QR solicitado al módulo" });
+  const invitationUrl = `${PUBLIC_BASE_URL}/vincular/${encodeURIComponent(id)}/${encodeURIComponent(participantId)}/${encodeURIComponent(d.participantLinkRequest.shareToken)}`;
+  res.json({ ok: true, participant_id: participantId, alias, invitation_url: invitationUrl, message: "QR y enlace de vinculación disponibles" });
 });
 
 app.post("/admin/device/:deviceId/participant-link-cancel", (req, res) => {
