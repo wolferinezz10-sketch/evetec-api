@@ -1406,6 +1406,9 @@ app.post("/heartbeat", (req, res) => {
     localSales: Number(req.body.local_sales ?? d.telemetria?.localSales ?? 0),
     receivedAt: new Date().toISOString()
   };
+  if (Number(d.salesResetGeneration || 0) && d.telemetria.localSales < Number(d.salesResetLocalFloor || 0)) {
+    d.salesResetLocalFloor = Math.max(0, d.telemetria.localSales);
+  }
 
   guardarDatos();
 
