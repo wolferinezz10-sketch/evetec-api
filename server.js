@@ -187,6 +187,9 @@ function nuevoDevice(tipo = "premium") {
     comisionEvetecPorcentaje: COMISION_EVETEC_PORCENTAJE,
     modoCobro: "owner_commission",
     registroVentasHabilitado: true,
+    salesResetGeneration: 0,
+    salesResetAtEpoch: 0,
+    salesResetLocalFloor: 0,
     participantes: PARTICIPANT_NUMBERS.map(index => ({
       id: `p${index}`,
       nombre: index === 1 ? "EVETEC" : "",
@@ -606,6 +609,9 @@ function asegurarDevice(deviceId) {
 
   if (!d.modoCobro) d.modoCobro = "owner_commission";
   if (typeof d.registroVentasHabilitado === "undefined") d.registroVentasHabilitado = true;
+  if (!Number.isFinite(Number(d.salesResetGeneration))) d.salesResetGeneration = 0;
+  if (!Number.isFinite(Number(d.salesResetAtEpoch))) d.salesResetAtEpoch = 0;
+  if (!Number.isFinite(Number(d.salesResetLocalFloor))) d.salesResetLocalFloor = 0;
   if (!Array.isArray(d.participantes)) d.participantes = [];
   const participantesSinConfigurar = d.participantes.length === 0;
   d.participantes = PARTICIPANT_NUMBERS.map(number => {
@@ -1282,6 +1288,7 @@ app.get("/config/:deviceId", (req, res) => {
       evetecAccountReady: Boolean(EVETEC_MP_TOKEN),
       modoCobro: d.modoCobro,
       registro_ventas_habilitado: d.registroVentasHabilitado !== false,
+      sales_reset_generation: Number(d.salesResetGeneration || 0),
       participant_link_pending: d.participantLinkRequest ? {
         participant_id: d.participantLinkRequest.participantId,
         alias: d.participantLinkRequest.alias,
@@ -1311,6 +1318,7 @@ app.get("/config/:deviceId", (req, res) => {
       evetecAccountReady: Boolean(EVETEC_MP_TOKEN),
       modoCobro: d.modoCobro,
       registro_ventas_habilitado: d.registroVentasHabilitado !== false,
+      sales_reset_generation: Number(d.salesResetGeneration || 0),
       participantes: d.participantes.map(p => ({
         id: p.id,
         nombre: p.nombre,
@@ -2082,12 +2090,14 @@ app.post("/device/claim-payment", requireDevice, async (req, res) => {
 
 app.get("/device/usage-status/:deviceId", requireDevice, (req, res) => {
   const deviceId = String(req.params.deviceId || "").trim().toUpperCase();
+  const d = asegurarDevice(deviceId);
   const events = eventosUsoDevice(deviceId);
   const latest = events.length ? events[events.length - 1].event_id : "";
   res.json({
     ok: true,
-    count: events.length,
+    count: Math.max(0, Number(d.salesResetLocalFloor || 0)) + events.length,
     latest_event_id: latest,
+    sales_reset_generation: Number(d.salesResetGeneration || 0),
     server_epoch: Math.floor(Date.now() / 1000)
   });
 });
@@ -2116,6 +2126,8 @@ app.post("/device/usage-sync", requireDevice, (req, res) => {
   for (const source of incoming) {
     const eventId = String(source.event_id || source.payment_id || "").trim().slice(0, 120);
     if (!eventId) continue;
+    const approvedEpoch = Math.max(0, Math.round(Number(source.approved_epoch || 0)));
+    if (Number(d.salesResetAtEpoch || 0) && approvedEpoch <= Number(d.salesResetAtEpoch)) continue;
     const existing = usageEvents[eventId];
     if (existing && existing.device_id !== deviceId) continue;
     const amountCents = Math.max(0, Math.round(Number(source.amount_cents || 0)));
@@ -2125,7 +2137,7 @@ app.post("/device/usage-sync", requireDevice, (req, res) => {
       event_id: eventId,
       payment_id: String(source.payment_id || eventId).slice(0, 120),
       device_id: deviceId,
-      approved_epoch: Math.max(0, Math.round(Number(source.approved_epoch || 0))),
+      approved_epoch: approvedEpoch,
       started_epoch: Math.max(0, Math.round(Number(source.started_epoch || 0))),
       finished_epoch: Math.max(0, Math.round(Number(source.finished_epoch || 0))),
       amount_cents: amountCents,
@@ -3552,6 +3564,32 @@ app.post("/admin/device/:deviceId/toggle-sales-log", (req, res) => {
   res.redirect(adminDeviceUrl(id));
 });
 
+app.post("/admin/sales-reset-all", (req, res) => {
+  if (String(req.body.confirmation || "").trim().toUpperCase() !== "BORRAR VENTAS") {
+    return res.status(400).json({ ok: false, error: "confirmation_required" });
+  }
+  const resetAt = new Date();
+  const resetEpoch = Math.floor(resetAt.getTime() / 1000);
+  const resetGeneration = resetEpoch;
+  const removedEvents = Object.keys(usageEvents).length;
+  const removedPayments = Object.keys(pagosCreados).length;
+  usageEvents = {};
+  pagosCreados = {};
+  for (const id of Object.keys(devices)) {
+    const d = asegurarDevice(id);
+    d.stats = statsIniciales();
+    d.ledgerBaseline = null;
+    d.backupConfirmedCount = 0;
+    d.backupConfirmedAt = null;
+    d.salesResetAtEpoch = resetEpoch;
+    d.salesResetGeneration = resetGeneration;
+    d.salesResetLocalFloor = Math.max(0, Number(d.telemetria?.localSales || 0));
+    if (d.tipo === "arcade") d.arcadeCredits = 0;
+  }
+  guardarDatos();
+  res.json({ ok: true, removed_events: removedEvents, removed_payment_keys: removedPayments, reset_generation: resetGeneration });
+});
+
 app.get("/admin/device/:deviceId/live-stats", (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const usageList = eventosUsoDevice(id);
@@ -4136,6 +4174,7 @@ app.get("/health", (req, res) => {
       ownerLinked: cuentaExternaLista(d),
       ownerUserId: participantePrincipalParaCobro(d)?.userId || d.ownerUserId || null,
       modoCobro: d.modoCobro,
+      sales_reset_generation: Number(d.salesResetGeneration || 0),
       comisionEvetecPorcentaje: d.comisionEvetecPorcentaje,
       telemetria: d.telemetria || null
     }])
