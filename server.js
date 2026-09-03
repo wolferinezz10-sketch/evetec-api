@@ -532,6 +532,19 @@ function guardarDatos() {
   }
 }
 
+async function guardarCuentaClienteDb(account, originalUsername = "") {
+  if (!databaseReady || !databasePool || !account?.username) return;
+  const original = normalizarUsuarioCliente(originalUsername);
+  if (original && original !== account.username) {
+    await databasePool.query("DELETE FROM evetec_client_accounts WHERE username = $1", [original]);
+  }
+  await databasePool.query(
+    `INSERT INTO evetec_client_accounts (username, payload, updated_at) VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (username) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+    [account.username, JSON.stringify(account)]
+  );
+}
+
 function aplicarSnapshot(data) {
   if (!data || typeof data !== "object") return;
   if (data.configGlobal) {
@@ -705,6 +718,11 @@ async function iniciarPersistencia() {
       payload JSONB NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
+    await databasePool.query(`CREATE TABLE IF NOT EXISTS evetec_client_accounts (
+      username TEXT PRIMARY KEY,
+      payload JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
     const result = await databasePool.query("SELECT payload FROM evetec_state WHERE id = 'main'");
     if (result.rows[0]?.payload) {
       aplicarSnapshot(result.rows[0].payload);
@@ -713,6 +731,19 @@ async function iniciarPersistencia() {
       asegurarDevice(PLUSH_DEVICE_ID);
       deduplicarEventosUso();
       console.log("Datos EVETEC restaurados desde PostgreSQL");
+    }
+    const clientResult = await databasePool.query("SELECT username, payload FROM evetec_client_accounts ORDER BY username");
+    if (clientResult.rows.length) {
+      aplicarSnapshot({ clientAccounts: Object.fromEntries(clientResult.rows.map(row => [row.username, row.payload])) });
+      console.log(`Cuentas de clientes restauradas: ${clientResult.rows.length}`);
+    } else if (Object.keys(clientAccounts).length) {
+      for (const account of Object.values(clientAccounts)) {
+        await databasePool.query(
+          `INSERT INTO evetec_client_accounts (username, payload, updated_at) VALUES ($1, $2::jsonb, NOW())
+           ON CONFLICT (username) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+          [account.username, JSON.stringify(account)]
+        );
+      }
     }
     databaseReady = true;
     guardarDatos();
@@ -3610,7 +3641,7 @@ app.get("/admin/device/:deviceId/live-stats", (req, res) => {
   });
 });
 
-app.post("/admin/client-account/save", (req, res) => {
+app.post("/admin/client-account/save", async (req, res) => {
   const username = normalizarUsuarioCliente(req.body.username);
   const originalUsername = normalizarUsuarioCliente(req.body.originalUsername);
   const displayName = String(req.body.displayName || "").trim().slice(0, 60);
@@ -3641,10 +3672,12 @@ app.post("/admin/client-account/save", (req, res) => {
   if (originalUsername && originalUsername !== username) delete clientAccounts[originalUsername];
   clientAccounts[username] = account;
   guardarDatos();
+  try { await guardarCuentaClienteDb(account, originalUsername); }
+  catch (error) { console.error("No se pudo persistir la cuenta cliente:", error.message); return res.status(503).send("La cuenta no pudo confirmarse en la base de datos. Intentá nuevamente."); }
   res.redirect(deviceIds[0] ? `/admin?device=${encodeURIComponent(deviceIds[0])}` : "/admin");
 });
 
-app.post("/admin/client-account/toggle", (req, res) => {
+app.post("/admin/client-account/toggle", async (req, res) => {
   const username = normalizarUsuarioCliente(req.body.username);
   const account = clientAccounts[username];
   if (!account) return res.status(404).send("Cliente inexistente.");
@@ -3652,6 +3685,8 @@ app.post("/admin/client-account/toggle", (req, res) => {
   account.sessionVersion = Math.max(1, Number(account.sessionVersion || 1)) + 1;
   account.updatedAt = new Date().toISOString();
   guardarDatos();
+  try { await guardarCuentaClienteDb(account); }
+  catch (error) { console.error("No se pudo persistir el estado del cliente:", error.message); return res.status(503).send("El cambio no pudo confirmarse en la base de datos."); }
   res.redirect("/admin");
 });
 
