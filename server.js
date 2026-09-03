@@ -2974,7 +2974,7 @@ app.get("/admin", (req, res) => {
     <nav class="device-tabs" aria-label="Módulos">${deviceTabs}</nav>
     <header class="top">
       <div><div class="brand">EVETEC AUTOMOTIVE</div><h1>${escaparHtml(cfg.nombre || "Equipo QR")}</h1><div class="sub">Panel independiente del módulo <b>${id}</b></div></div>
-      <div class="status"><span class="dot"></span>${d.online ? "Equipo online" : "Equipo offline"}</div>
+      <div class="actions"><div class="status"><span class="dot"></span>${d.online ? "Equipo online" : "Equipo offline"}</div><a class="btn secondary" href="/logout">Cerrar sesión</a></div>
     </header>
 
     <section class="card test-mode">
