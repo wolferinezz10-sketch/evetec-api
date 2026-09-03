@@ -19,6 +19,7 @@ const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || "";
 const EVETEC_MP_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN || "";
 const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const CLIENT_SESSION_SECRET = process.env.CLIENT_SESSION_SECRET || ADMIN_PASSWORD;
 const DEVICE_API_KEY = process.env.DEVICE_API_KEY || "";
 const PROTOTYPE_DEVICE_ID = "ASPIRADORA_BASIC_001";
 const PLUSH_DEVICE_ID = "PELUCHE_001";
@@ -199,6 +200,80 @@ function nuevoDevice(tipo = "premium") {
   };
 }
 
+async function fetchConTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const clientLoginAttempts = new Map();
+
+function normalizarUsuarioCliente(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 48);
+}
+
+function hashPasswordCliente(password, salt = crypto.randomBytes(16).toString("hex")) {
+  return { salt, hash: crypto.scryptSync(String(password), salt, 64).toString("hex") };
+}
+
+function verificarPasswordCliente(password, account) {
+  if (!account?.passwordSalt || !account?.passwordHash) return false;
+  const candidate = crypto.scryptSync(String(password), account.passwordSalt, 64).toString("hex");
+  return comparacionSegura(candidate, account.passwordHash);
+}
+
+function cookiesDe(req) {
+  return Object.fromEntries(String(req.headers.cookie || "").split(";").map(part => {
+    const index = part.indexOf("=");
+    return index < 0 ? ["", ""] : [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1))];
+  }).filter(([key]) => key));
+}
+
+function firmarSesionCliente(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = crypto.createHmac("sha256", CLIENT_SESSION_SECRET).update(body).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function leerSesionCliente(req) {
+  if (!CLIENT_SESSION_SECRET) return null;
+  const token = cookiesDe(req).evetec_client_session || "";
+  const split = token.lastIndexOf(".");
+  if (split < 1) return null;
+  const body = token.slice(0, split);
+  const signature = token.slice(split + 1);
+  const expected = crypto.createHmac("sha256", CLIENT_SESSION_SECRET).update(body).digest("base64url");
+  if (!comparacionSegura(signature, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    const account = clientAccounts[normalizarUsuarioCliente(payload.u)];
+    if (!account?.active || Number(payload.exp || 0) < Date.now() || Number(payload.v || 0) !== Number(account.sessionVersion || 1)) return null;
+    return { account, csrf: String(payload.csrf || "") };
+  } catch (_) {
+    return null;
+  }
+}
+
+function requireClient(req, res, next) {
+  const session = leerSesionCliente(req);
+  if (!session) {
+    if (req.path.includes("live-stats")) return res.status(401).json({ ok: false, error: "session_expired" });
+    return res.redirect(`/cliente/login?next=${encodeURIComponent(req.originalUrl || "/cliente")}`);
+  }
+  req.clientAccount = session.account;
+  req.clientCsrf = session.csrf;
+  next();
+}
+
+function verificarCsrfCliente(req, res, next) {
+  if (comparacionSegura(req.body.csrf, req.clientCsrf)) return next();
+  return res.status(403).send("La sesión cambió. Volvé al panel e intentá nuevamente.");
+}
+
 function nuevoPrototypeDevice() {
   return {
     ...nuevoDevice("basic"),
@@ -212,6 +287,7 @@ let devices = {
 
 let pagosCreados = {};
 let usageEvents = {};
+let clientAccounts = {};
 
 function escaparHtml(v) {
   return String(v ?? "")
@@ -401,7 +477,7 @@ function asegurarEstructuraConfig() {
 }
 
 function guardarDatos() {
-  const snapshot = { devices, pagosCreados, usageEvents, configGlobal };
+  const snapshot = { devices, pagosCreados, usageEvents, configGlobal, clientAccounts };
   try {
     fs.writeFileSync(
       DATA_FILE,
@@ -417,7 +493,7 @@ function guardarDatos() {
         await databasePool.query(
           `INSERT INTO evetec_state (id, payload, updated_at) VALUES ('main', $1::jsonb, NOW())
            ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
-          [JSON.stringify({ devices, pagosCreados, usageEvents, configGlobal })]
+          [JSON.stringify({ devices, pagosCreados, usageEvents, configGlobal, clientAccounts })]
         );
       } catch (err) {
         console.error("Error guardando PostgreSQL:", err.message);
@@ -435,6 +511,19 @@ function aplicarSnapshot(data) {
   if (data.devices) devices = limpiarDevicesMigrados(data.devices);
   if (data.pagosCreados) pagosCreados = data.pagosCreados;
   if (data.usageEvents && typeof data.usageEvents === "object") usageEvents = data.usageEvents;
+  if (data.clientAccounts && typeof data.clientAccounts === "object") {
+    clientAccounts = Object.fromEntries(Object.entries(data.clientAccounts).map(([key, value]) => {
+      const username = normalizarUsuarioCliente(value?.username || key);
+      return [username, {
+        ...value,
+        username,
+        displayName: String(value?.displayName || username).slice(0, 60),
+        deviceIds: Array.isArray(value?.deviceIds) ? [...new Set(value.deviceIds.map(id => String(id || "").trim().toUpperCase()).filter(Boolean))] : [],
+        active: value?.active !== false,
+        sessionVersion: Math.max(1, Number(value?.sessionVersion || 1))
+      }];
+    }).filter(([username]) => username));
+  }
 }
 
 function cargarDatos() {
@@ -862,7 +951,7 @@ async function renovarCredencialMercadoPago(deviceId, credential) {
     const currentRefreshToken = credential.participantId ? target?.refreshToken : d.ownerRefreshToken;
     if (!target || !currentRefreshToken) return null;
 
-    const response = await fetch("https://api.mercadopago.com/oauth/token", {
+    const response = await fetchConTimeout("https://api.mercadopago.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -899,7 +988,7 @@ async function renovarCredencialMercadoPago(deviceId, credential) {
 
 async function fetchMercadoPagoAutorizado(deviceId, url, options, credential) {
   const currentCredential = credential || obtenerTokenParaCobrar(deviceId);
-  const request = token => fetch(url, {
+  const request = token => fetchConTimeout(url, {
     ...options,
     headers: {
       ...(options?.headers || {}),
@@ -1700,7 +1789,7 @@ async function buscarEstadoMercadoPago(id) {
 
     const r = deviceId
       ? await fetchMercadoPagoAutorizado(deviceId, url, {}, credential)
-      : await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      : await fetchConTimeout(url, { headers: { Authorization: `Bearer ${token}` } });
 
     const data = await r.json();
 
@@ -2182,7 +2271,7 @@ app.get("/oauth/callback", async (req, res) => {
   try {
     const d = asegurarDevice(deviceId);
 
-    const r = await fetch("https://api.mercadopago.com/oauth/token", {
+    const r = await fetchConTimeout("https://api.mercadopago.com/oauth/token", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2530,6 +2619,123 @@ app.get("/galaga", (req, res) => {
 </html>`);
 });
 // =====================================================
+// PORTAL LIMITADO PARA CLIENTES
+// =====================================================
+
+function cookieSesionCliente(req, token, maxAgeSeconds) {
+  const secure = req.secure || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+  return `evetec_client_session=${encodeURIComponent(token)}; Path=/cliente; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure ? "; Secure" : ""}`;
+}
+
+function payloadEstadisticasCliente(deviceId) {
+  const d = asegurarDevice(deviceId);
+  const usageList = eventosUsoDevice(deviceId);
+  const stats = usageList.length ? statsDesdeUso(deviceId) : (d.stats || statsIniciales());
+  const total = Number(stats.totalRecaudado || 0);
+  const participantCount = Math.max(1, Math.min(MAX_PARTICIPANTS, Number(d.cantidadParticipantes || 1)));
+  return {
+    ok: true,
+    online: Boolean(d.online),
+    ultimaConexion: d.ultimaConexion || null,
+    firmware: d.telemetria?.firmware || "Sin informar",
+    ssid: d.telemetria?.ssid || "-",
+    rssi: Number(d.telemetria?.rssi || 0),
+    totalRecaudado: total,
+    pagosAprobados: Number(stats.pagosAprobados || 0),
+    segundosVendidos: Number(stats.segundosVendidos || 0),
+    tiempoMotor: Number(stats.tiempoMotor || 0),
+    comisionesMp: Number(stats.comisionesMp || 0),
+    netoDespuesMp: Number(stats.netoDespuesMp || 0),
+    tasaMpEfectiva: total > 0 ? Number(stats.comisionesMp || 0) * 100 / total : 0,
+    participantTotals: stats.participantTotals || {},
+    participants: d.participantes.slice(0, participantCount).filter(p => p.nombre && Number(p.porcentaje) > 0).map(p => ({ id: p.id, nombre: p.nombre, porcentaje: Number(p.porcentaje), total: Number(stats.participantTotals?.[p.id] || 0) }))
+  };
+}
+
+app.get("/cliente/login", (req, res) => {
+  if (leerSesionCliente(req)) return res.redirect("/cliente");
+  const error = req.query.error ? `<div class="error">Usuario o contraseña incorrectos.</div>` : "";
+  res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acceso cliente · EVETEC</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#15344b,#06111e 55%);font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#edf8ff}.login{width:min(92vw,430px);background:#0d1d2c;border:1px solid #28445d;border-radius:22px;padding:32px;box-shadow:0 30px 80px #0008}.brand{color:#39d8e7;font-weight:900;letter-spacing:.16em;font-size:13px}h1{margin:8px 0 6px;font-size:30px}p{color:#9cb2c6;margin:0 0 24px}.field{display:grid;gap:7px;margin:14px 0}label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#a9c1d5;font-weight:800}input{width:100%;padding:13px;border-radius:11px;border:1px solid #35516a;background:#081521;color:white;font-size:16px}button{width:100%;border:0;border-radius:11px;padding:14px;background:#35d5e4;color:#03202a;font-weight:900;font-size:15px;cursor:pointer;margin-top:8px}.error{background:#4a1d29;border:1px solid #923649;color:#ffc2ca;padding:11px;border-radius:10px;margin:15px 0}</style></head><body><main class="login"><div class="brand">EVETEC</div><h1>Panel de tu equipo</h1><p>Consultá la actividad en tiempo real y ajustá precios y tiempos.</p>${error}<form method="POST" action="/cliente/login"><input type="hidden" name="next" value="${escaparHtml(String(req.query.next || "/cliente").slice(0, 200))}"><div class="field"><label>Usuario</label><input name="username" autocomplete="username" required autofocus></div><div class="field"><label>Contraseña</label><input type="password" name="password" autocomplete="current-password" required></div><button type="submit">Ingresar</button></form></main></body></html>`);
+});
+
+app.post("/cliente/login", (req, res) => {
+  if (!CLIENT_SESSION_SECRET) return res.status(503).send("Acceso de clientes no configurado.");
+  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const now = Date.now();
+  const attempts = clientLoginAttempts.get(ip) || { count: 0, since: now };
+  if (now - attempts.since > 15 * 60 * 1000) Object.assign(attempts, { count: 0, since: now });
+  if (attempts.count >= 8) return res.status(429).send("Demasiados intentos. Esperá 15 minutos.");
+  const username = normalizarUsuarioCliente(req.body.username);
+  const account = clientAccounts[username];
+  if (!account?.active || !verificarPasswordCliente(req.body.password, account)) {
+    attempts.count++;
+    clientLoginAttempts.set(ip, attempts);
+    return res.redirect("/cliente/login?error=1");
+  }
+  clientLoginAttempts.delete(ip);
+  const csrf = crypto.randomBytes(18).toString("base64url");
+  const token = firmarSesionCliente({ u: username, v: Number(account.sessionVersion || 1), csrf, exp: now + 12 * 60 * 60 * 1000 });
+  res.set("Set-Cookie", cookieSesionCliente(req, token, 12 * 60 * 60));
+  const next = String(req.body.next || "/cliente");
+  res.redirect(next.startsWith("/cliente") && !next.startsWith("//") ? next : "/cliente");
+});
+
+app.use("/cliente", (req, res, next) => req.path === "/login" ? next() : requireClient(req, res, next));
+
+app.post("/cliente/logout", verificarCsrfCliente, (req, res) => {
+  res.set("Set-Cookie", cookieSesionCliente(req, "", 0));
+  res.redirect("/cliente/login");
+});
+
+app.get("/cliente", (req, res) => {
+  const allowedIds = req.clientAccount.deviceIds.filter(id => devices[id]);
+  if (!allowedIds.length) return res.status(403).send("Esta cuenta todavía no tiene equipos asignados. Contactá a EVETEC.");
+  const requested = String(req.query.device || "").trim().toUpperCase();
+  const id = allowedIds.includes(requested) ? requested : allowedIds[0];
+  const d = asegurarDevice(id);
+  const cfg = d.tipo === "gachapon" ? configuracionGachaponDevice(id) : configuracionServicioDevice(id);
+  const live = payloadEstadisticasCliente(id);
+  const events = eventosUsoDevice(id).slice(-30).reverse();
+  const tabs = allowedIds.map(deviceId => `<a class="tab ${deviceId === id ? "active" : ""}" href="/cliente?device=${encodeURIComponent(deviceId)}"><i class="${devices[deviceId].online ? "on" : ""}"></i><span>${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`).join("");
+  const participantCards = live.participants.map(p => `<div class="card stat"><span>${escaparHtml(p.nombre)} · ${p.porcentaje.toLocaleString("es-AR", {maximumFractionDigits:2})}%</span><b data-participant="${escaparHtml(p.id)}">$${formatoDinero(p.total)}</b><small>neto acumulado, comisión MP proporcional</small></div>`).join("");
+  const configForm = d.tipo === "gachapon" ? `<h2>Precios y tiempo</h2><p class="muted">El modo de funcionamiento y la cantidad de opciones los administra EVETEC.</p><form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><div class="grid"><label>Segundos por jugada<input name="segundosPorJugada" type="number" min="1" max="600" step="1" value="${Number(cfg.segundos_por_jugada || 30)}" required></label>${cfg.planes.slice(0, Number(cfg.cantidad_opciones || 3)).map((plan,index)=>`<label>Precio · ${index+1} jugada${index ? "s" : ""}<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(plan.monto)}" required></label>`).join("")}</div><button>Guardar precios y tiempo</button></form>` : `<h2>Precio y duración</h2><form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><div class="grid"><label>Precio (ARS)<input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></label><label>Minutos<input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos)/60)}" required></label><label>Segundos<input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos)%60}" required></label></div><button>Guardar precio y duración</button></form>`;
+  const rows = events.map(e => `<tr><td>${e.approved_epoch ? new Date(Number(e.approved_epoch)*1000).toLocaleString("es-AR") : "-"}</td><td>$${formatoDinero(Number(e.amount_cents||0)/100)}</td><td>$${formatoDinero(Number(e.mp_fee_cents||0)/100)}</td><td>${formatoTiempo(e.sold_seconds)}</td><td>${formatoTiempo(e.actual_seconds)}</td><td>${e.completed === false ? "Interrumpido" : "Completado"}</td></tr>`).join("");
+  res.set("Cache-Control", "no-store");
+  res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escaparHtml(cfg.nombre)} · EVETEC</title><style>:root{--bg:#06111e;--panel:#0d1d2c;--line:#29445c;--cyan:#35d5e4;--muted:#9bb1c4;--green:#31d17c;--yellow:#ffc84b}*{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#071522,#04101b);color:#edf8ff;font-family:system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1220px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin:18px 0}.brand{color:var(--cyan);font-size:12px;font-weight:900;letter-spacing:.16em}h1{margin:4px 0;font-size:clamp(26px,4vw,42px)}h2{margin-top:0}.muted,small{color:var(--muted)}.status{padding:10px 14px;border:1px solid var(--line);border-radius:999px;font-weight:800}.status i,.tab i{display:inline-block;width:9px;height:9px;border-radius:50%;background:#e95064;margin-right:7px}.status i.on,.tab i.on{background:var(--green);box-shadow:0 0 10px var(--green)}.tabs{display:flex;gap:9px;overflow:auto}.tab{min-width:190px;padding:12px;border:1px solid var(--line);border-radius:13px;color:white;text-decoration:none;display:grid;grid-template-columns:14px 1fr}.tab small{grid-column:2}.tab.active{border-color:var(--cyan);background:#113047}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin:18px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:20px}.stat span{display:block;color:#a9c2d6;text-transform:uppercase;font-size:11px;font-weight:850;letter-spacing:.07em}.stat b{font-size:28px;display:block;margin:8px 0}.columns{display:grid;grid-template-columns:1.2fr .8fr;gap:14px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}label{display:grid;gap:7px;color:#a9c2d6;font-size:12px;text-transform:uppercase;font-weight:800}input{padding:12px;border-radius:10px;border:1px solid #35516a;background:#071522;color:white;font-size:17px}button{border:0;border-radius:10px;padding:12px 16px;background:var(--cyan);color:#03202a;font-weight:900;cursor:pointer;margin-top:14px}.readonly{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line);padding:10px 0}.table{overflow:auto;margin-top:14px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted);font-size:11px;text-transform:uppercase}.logout{background:transparent;color:#bcd0df;border:1px solid var(--line);margin:0}@media(max-width:850px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}}@media(max-width:560px){main{padding:14px}.top{align-items:flex-start}.grid{grid-template-columns:1fr}.stats{gap:8px}.card{padding:15px}}</style></head><body><main><div class="tabs">${tabs}</div><header class="top"><div><div class="brand">EVETEC · PORTAL DEL CLIENTE</div><h1>${escaparHtml(cfg.nombre)}</h1><div class="muted">${escaparHtml(req.clientAccount.displayName)} · ${escaparHtml(id)}</div></div><form method="POST" action="/cliente/logout"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><button class="logout">Salir</button></form></header><div class="status"><i id="online-dot" class="${live.online ? "on" : ""}"></i><span id="online-label">${live.online ? "Equipo online" : "Equipo offline"}</span></div><section class="stats"><div class="card stat"><span>Recaudado</span><b id="total">$${formatoDinero(live.totalRecaudado)}</b></div><div class="card stat"><span>Pagos aprobados</span><b id="payments">${live.pagosAprobados}</b></div><div class="card stat"><span>Tiempo vendido</span><b id="sold">${formatoTiempo(live.segundosVendidos)}</b></div><div class="card stat"><span>Uso real</span><b id="used">${formatoTiempo(live.tiempoMotor)}</b></div>${participantCards}<div class="card stat"><span>Comisión MP real</span><b id="fees">$${formatoDinero(live.comisionesMp)}</b></div><div class="card stat"><span>Tasa efectiva MP</span><b id="rate">${live.tasaMpEfectiva.toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2})}%</b></div><div class="card stat"><span>Neto tras MP</span><b id="net">$${formatoDinero(live.netoDespuesMp)}</b></div></section><section class="columns"><div class="card">${configForm}</div><aside class="card"><h2>Estado del equipo</h2><div class="readonly"><span>Última conexión</span><b id="last-seen">${live.ultimaConexion ? new Date(live.ultimaConexion).toLocaleString("es-AR") : "Nunca"}</b></div><div class="readonly"><span>Firmware</span><b>${escaparHtml(live.firmware)}</b></div><div class="readonly"><span>WiFi / señal</span><b>${escaparHtml(live.ssid)} ${live.rssi ? `(${live.rssi} dBm)` : ""}</b></div><div class="readonly"><span>Reparto</span><b>Solo lectura</b></div><p class="muted">Los porcentajes, vinculaciones y la cuenta receptora son administrados por EVETEC. Las cifras reflejan los pagos confirmados y sincronizados.</p></aside></section><section class="card" style="margin-top:14px"><h2>Servicios confirmados</h2><div class="table"><table><thead><tr><th>Fecha</th><th>Monto</th><th>Comisión MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${rows || `<tr><td colspan="6">Todavía no hay servicios registrados.</td></tr>`}</tbody></table></div></section><script>const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{maximumFractionDigits:2});const time=n=>{n=Number(n||0);const h=Math.floor(n/3600),m=Math.floor(n%3600/60),s=n%60;return h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'};async function refresh(){try{const r=await fetch('/cliente/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const x=await r.json();document.getElementById('online-dot').classList.toggle('on',x.online);document.getElementById('online-label').textContent=x.online?'Equipo online':'Equipo offline';document.getElementById('total').textContent=money(x.totalRecaudado);document.getElementById('payments').textContent=x.pagosAprobados;document.getElementById('sold').textContent=time(x.segundosVendidos);document.getElementById('used').textContent=time(x.tiempoMotor);document.getElementById('fees').textContent=money(x.comisionesMp);document.getElementById('net').textContent=money(x.netoDespuesMp);document.getElementById('rate').textContent=Number(x.tasaMpEfectiva).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';document.getElementById('last-seen').textContent=x.ultimaConexion?new Date(x.ultimaConexion).toLocaleString('es-AR'):'Nunca';document.querySelectorAll('[data-participant]').forEach(el=>el.textContent=money(x.participantTotals[el.dataset.participant]||0))}catch(_){}}setInterval(refresh,5000)</script></main></body></html>`);
+});
+
+app.get("/cliente/device/:deviceId/live-stats", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  if (!req.clientAccount.deviceIds.includes(id) || !devices[id]) return res.status(403).json({ ok: false, error: "device_forbidden" });
+  res.set("Cache-Control", "no-store");
+  res.json(payloadEstadisticasCliente(id));
+});
+
+app.post("/cliente/device/:deviceId/update", verificarCsrfCliente, (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  if (!req.clientAccount.deviceIds.includes(id) || !devices[id]) return res.status(403).send("Equipo no autorizado.");
+  const d = asegurarDevice(id);
+  if (d.tipo === "gachapon") {
+    const cfg = configuracionGachaponDevice(id);
+    const seconds = Number(req.body.segundosPorJugada);
+    if (Number.isFinite(seconds)) cfg.segundos_por_jugada = Math.max(1, Math.min(600, Math.round(seconds)));
+    for (let index = 0; index < Number(cfg.cantidad_opciones || 3); index++) {
+      const amount = Number(req.body[`monto${index}`]);
+      if (Number.isFinite(amount) && amount > 0) cfg.planes[index].monto = Math.round(amount * 100) / 100;
+    }
+  } else {
+    const cfg = configuracionServicioDevice(id);
+    const amount = Number(req.body.monto);
+    const minutes = Number(req.body.minutos);
+    const seconds = Number(req.body.segundosServicio);
+    if (Number.isFinite(amount) && amount > 0) cfg.monto = Math.round(amount * 100) / 100;
+    if (Number.isFinite(minutes) && Number.isFinite(seconds)) cfg.segundos = Math.max(1, Math.min(3600, Math.round(Math.max(0, Math.min(60, minutes))) * 60 + Math.round(Math.max(0, Math.min(59, seconds)))));
+  }
+  guardarDatos();
+  res.redirect(`/cliente?device=${encodeURIComponent(id)}`);
+});
+
+// =====================================================
 // ADMIN
 // =====================================================
 
@@ -2600,6 +2806,13 @@ app.get("/admin", (req, res) => {
     const tabDevice = asegurarDevice(deviceId);
     return `<a class="device-tab ${deviceId === id ? "active" : ""}" href="/admin?device=${encodeURIComponent(deviceId)}"><span class="tab-dot ${tabDevice.online ? "online-dot" : ""}"></span><span>${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`;
   }).join("");
+  const clientAccountRows = Object.values(clientAccounts).sort((a, b) => a.displayName.localeCompare(b.displayName)).map(account => `
+    <tr>
+      <td><b>${escaparHtml(account.displayName)}</b><br><span class="hint">${escaparHtml(account.username)}</span></td>
+      <td>${account.deviceIds.map(deviceId => `<span class="pill muted">${escaparHtml(devices[deviceId] ? (nombreVisibleDevice(deviceId) || deviceId) : deviceId)}</span>`).join(" ") || "Sin equipos"}</td>
+      <td><span class="pill ${account.active ? "success" : "warning"}">${account.active ? "Habilitado" : "Suspendido"}</span></td>
+      <td><button class="mini-btn" type="button" data-client-edit="${escaparHtml(account.username)}" data-client-name="${escaparHtml(account.displayName)}" data-client-devices="${escaparHtml(account.deviceIds.join(","))}">Editar / clave nueva</button><form method="POST" action="/admin/client-account/toggle" style="display:inline"><input type="hidden" name="username" value="${escaparHtml(account.username)}"><button class="mini-btn ${account.active ? "danger-mini" : ""}" type="submit">${account.active ? "Suspender" : "Habilitar"}</button></form></td>
+    </tr>`).join("");
 
   let pagosHtml = pagos.map(p => `
     <tr>
@@ -2758,11 +2971,29 @@ app.get("/admin", (req, res) => {
     </section>
 
     <section class="card" style="margin-top:16px"><h2>Servicios confirmados por el equipo</h2><p class="hint">La tasa mostrada es el porcentaje real descontado en cada transacción, no una estimación.</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Pago</th><th>Monto</th><th>Comisión MP</th><th>% MP real</th><th>Neto MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${pagosHtml}</tbody></table></div></section>
+    <section class="card" style="margin-top:16px">
+      <h2>Accesos de clientes</h2>
+      <p class="hint">Cada cliente ve únicamente sus módulos y sus datos en vivo. Puede cambiar precios y tiempos; reparto, cuentas Mercado Pago, mantenimiento, respaldos y registro de ventas siguen siendo exclusivos de EVETEC.</p>
+      <form method="POST" action="/admin/client-account/save" id="client-account-form">
+        <input type="hidden" name="originalUsername" id="client-original-username">
+        <div class="form-grid">
+          <div class="field"><label>Nombre del cliente</label><input name="displayName" id="client-display-name" maxlength="60" required></div>
+          <div class="field"><label>Usuario</label><input name="username" id="client-username" pattern="[A-Za-z0-9._-]{3,48}" autocomplete="off" required></div>
+          <div class="field wide"><label>Contraseña <span class="hint">(obligatoria al crear; en blanco conserva la actual)</span></label><div style="display:flex;gap:8px"><input name="password" id="client-password" type="password" minlength="10" autocomplete="new-password" style="flex:1"><button class="mini-btn" type="button" id="generate-client-password">Generar</button></div></div>
+          <div class="field wide"><label>Equipos asignados</label><div class="switches">${deviceIds.map(deviceId => `<label class="check"><input type="checkbox" name="deviceIds" value="${escaparHtml(deviceId)}" data-client-device="${escaparHtml(deviceId)}"> ${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</label>`).join("")}</div></div>
+        </div>
+        <div class="actions"><button class="btn primary" type="submit">Guardar acceso</button><a class="btn secondary" href="/cliente/login" target="_blank" rel="noopener">Abrir portal del cliente</a></div>
+      </form>
+      <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Cliente</th><th>Equipos</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${clientAccountRows || `<tr><td colspan="4" class="empty">Todavía no hay accesos de clientes.</td></tr>`}</tbody></table></div>
+    </section>
     <details class="card module-add"><summary>+ Incorporar otro módulo</summary><form class="new-device-form" method="POST" action="/admin/device/add"><div class="field"><label>Identificador único</label><input name="deviceId" placeholder="PELUCHE_001" pattern="[A-Za-z0-9_-]{3,40}" required></div><div class="field"><label>Tipo</label><select name="tipo"><option value="basic">Servicio temporizado</option><option value="gachapon">Máquina de peluches / premios</option><option value="arcade">Arcade / créditos</option><option value="premium">Planes múltiples</option></select></div><button class="btn primary" type="submit">Crear módulo</button></form></details>
     <div class="footer">Los cambios de precio y tiempos son consultados automáticamente por la pantalla. Base: ${escaparHtml(PUBLIC_BASE_URL)}</div>
       <script>
       const participantCount=document.getElementById('participant-count');
       const autoDistribution=document.getElementById('auto-distribution');
+      const clientForm=document.getElementById('client-account-form');
+      document.getElementById('generate-client-password').addEventListener('click',()=>{const chars='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%';const bytes=crypto.getRandomValues(new Uint8Array(16));const value=[...bytes].map(byte=>chars[byte%chars.length]).join('');const input=document.getElementById('client-password');input.type='text';input.value=value;input.focus();input.select()});
+      document.querySelectorAll('[data-client-edit]').forEach(button=>button.addEventListener('click',()=>{document.getElementById('client-original-username').value=button.dataset.clientEdit;document.getElementById('client-username').value=button.dataset.clientEdit;document.getElementById('client-display-name').value=button.dataset.clientName;document.getElementById('client-password').value='';const assigned=new Set(button.dataset.clientDevices.split(',').filter(Boolean));document.querySelectorAll('[data-client-device]').forEach(input=>input.checked=assigned.has(input.value));clientForm.scrollIntoView({behavior:'smooth',block:'center'})}));
       let balancingPercentages=false;
       function syncParticipantRows(){const count=Number(participantCount.value);document.querySelectorAll('[data-participant-row]').forEach(row=>{const number=Number(row.dataset.participantRow);const visible=number<=count;row.hidden=!visible;row.querySelectorAll('input').forEach(input=>input.disabled=!visible)})}
       function activePercentageInputs(){return [...document.querySelectorAll('input[name^="participant_pct_"]')].filter(input=>!input.disabled)}
@@ -3262,6 +3493,51 @@ app.get("/admin/device/:deviceId/live-stats", (req, res) => {
     pagosAprobados: Number(stats.pagosAprobados || 0),
     participantTotals: stats.participantTotals || {}
   });
+});
+
+app.post("/admin/client-account/save", (req, res) => {
+  const username = normalizarUsuarioCliente(req.body.username);
+  const originalUsername = normalizarUsuarioCliente(req.body.originalUsername);
+  const displayName = String(req.body.displayName || "").trim().slice(0, 60);
+  const password = String(req.body.password || "");
+  const requestedDevices = Array.isArray(req.body.deviceIds) ? req.body.deviceIds : (req.body.deviceIds ? [req.body.deviceIds] : []);
+  const deviceIds = [...new Set(requestedDevices.map(id => String(id || "").trim().toUpperCase()).filter(id => devices[id]))];
+  const existing = clientAccounts[originalUsername || username];
+  if (username.length < 3 || !displayName || !deviceIds.length) return res.status(400).send("Completá nombre, usuario válido y al menos un equipo.");
+  if (!existing && password.length < 10) return res.status(400).send("La contraseña inicial debe tener al menos 10 caracteres.");
+  if (username !== originalUsername && clientAccounts[username]) return res.status(409).send("Ese usuario ya existe.");
+  const account = {
+    ...(existing || {}),
+    username,
+    displayName,
+    deviceIds,
+    active: existing?.active !== false,
+    sessionVersion: Math.max(1, Number(existing?.sessionVersion || 1)),
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  if (password) {
+    if (password.length < 10) return res.status(400).send("La contraseña debe tener al menos 10 caracteres.");
+    const credential = hashPasswordCliente(password);
+    account.passwordSalt = credential.salt;
+    account.passwordHash = credential.hash;
+    account.sessionVersion++;
+  }
+  if (originalUsername && originalUsername !== username) delete clientAccounts[originalUsername];
+  clientAccounts[username] = account;
+  guardarDatos();
+  res.redirect(`/admin?device=${encodeURIComponent(deviceIds[0])}`);
+});
+
+app.post("/admin/client-account/toggle", (req, res) => {
+  const username = normalizarUsuarioCliente(req.body.username);
+  const account = clientAccounts[username];
+  if (!account) return res.status(404).send("Cliente inexistente.");
+  account.active = !account.active;
+  account.sessionVersion = Math.max(1, Number(account.sessionVersion || 1)) + 1;
+  account.updatedAt = new Date().toISOString();
+  guardarDatos();
+  res.redirect("/admin");
 });
 
 app.get("/participant-status/:deviceId/:participantId", (req, res) => {
