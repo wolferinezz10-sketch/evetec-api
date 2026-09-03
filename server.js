@@ -61,6 +61,8 @@ function requireAdmin(req, res, next) {
     return res.status(503).send("Panel administrativo deshabilitado: falta ADMIN_PASSWORD.");
   }
 
+  if (leerSesionAdmin(req)) return next();
+
   const auth = String(req.headers.authorization || "");
   if (auth.startsWith("Basic ")) {
     try {
@@ -229,8 +231,33 @@ function verificarPasswordCliente(password, account) {
 function cookiesDe(req) {
   return Object.fromEntries(String(req.headers.cookie || "").split(";").map(part => {
     const index = part.indexOf("=");
-    return index < 0 ? ["", ""] : [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1))];
+    if (index < 0) return ["", ""];
+    try { return [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1))]; }
+    catch (_) { return ["", ""]; }
   }).filter(([key]) => key));
+}
+
+function firmarSesionAdmin(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = crypto.createHmac("sha256", CLIENT_SESSION_SECRET).update(`admin.${body}`).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function leerSesionAdmin(req) {
+  if (!CLIENT_SESSION_SECRET || !ADMIN_PASSWORD) return null;
+  const token = cookiesDe(req).evetec_admin_session || "";
+  const split = token.lastIndexOf(".");
+  if (split < 1) return null;
+  const body = token.slice(0, split);
+  const signature = token.slice(split + 1);
+  const expected = crypto.createHmac("sha256", CLIENT_SESSION_SECRET).update(`admin.${body}`).digest("base64url");
+  if (!comparacionSegura(signature, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    return payload.role === "admin" && Number(payload.exp || 0) >= Date.now() ? payload : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function firmarSesionCliente(payload) {
@@ -2627,6 +2654,53 @@ function cookieSesionCliente(req, token, maxAgeSeconds) {
   return `evetec_client_session=${encodeURIComponent(token)}; Path=/cliente; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure ? "; Secure" : ""}`;
 }
 
+function cookieSesionAdmin(req, token, maxAgeSeconds) {
+  const secure = req.secure || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+  return `evetec_admin_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure ? "; Secure" : ""}`;
+}
+
+function htmlLoginUnificado(error = "", next = "") {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ingresar · EVETEC</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#15344b,#06111e 55%);font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#edf8ff}.login{width:min(92vw,430px);background:#0d1d2c;border:1px solid #28445d;border-radius:22px;padding:32px;box-shadow:0 30px 80px #0008}.brand{color:#39d8e7;font-weight:900;letter-spacing:.16em;font-size:13px}h1{margin:8px 0 6px;font-size:30px}p{color:#9cb2c6;margin:0 0 24px}.field{display:grid;gap:7px;margin:14px 0}label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#a9c1d5;font-weight:800}input{width:100%;padding:13px;border-radius:11px;border:1px solid #35516a;background:#081521;color:white;font-size:16px}button{width:100%;border:0;border-radius:11px;padding:14px;background:#35d5e4;color:#03202a;font-weight:900;font-size:15px;cursor:pointer;margin-top:8px}.error{background:#4a1d29;border:1px solid #923649;color:#ffc2ca;padding:11px;border-radius:10px;margin:15px 0}.note{font-size:12px;color:#7892a8;margin-top:16px;text-align:center}</style></head><body><main class="login"><div class="brand">EVETEC</div><h1>Acceso a la plataforma</h1><p>Usá tus credenciales. Te llevaremos automáticamente al panel que corresponda.</p>${error ? `<div class="error">${escaparHtml(error)}</div>` : ""}<form method="POST" action="/login"><input type="hidden" name="next" value="${escaparHtml(String(next || "").slice(0,200))}"><div class="field"><label>Usuario</label><input name="username" autocomplete="username" required autofocus></div><div class="field"><label>Contraseña</label><input type="password" name="password" autocomplete="current-password" required></div><button type="submit">Ingresar</button></form><div class="note">Administradores y clientes utilizan este mismo acceso.</div></main></body></html>`;
+}
+
+app.get("/login", (req, res) => {
+  if (leerSesionAdmin(req)) return res.redirect("/admin");
+  res.send(htmlLoginUnificado(req.query.error ? "Usuario o contraseña incorrectos." : "", req.query.next));
+});
+
+app.post("/login", (req, res) => {
+  if (!CLIENT_SESSION_SECRET) return res.status(503).send("Acceso no configurado.");
+  const username = normalizarUsuarioCliente(req.body.username);
+  const password = String(req.body.password || "");
+  if (username === "admin" && comparacionSegura(password, ADMIN_PASSWORD)) {
+    const token = firmarSesionAdmin({ role: "admin", exp: Date.now() + 12 * 60 * 60 * 1000 });
+    res.set("Set-Cookie", cookieSesionAdmin(req, token, 12 * 60 * 60));
+    return res.redirect("/admin");
+  }
+  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const now = Date.now();
+  const attempts = clientLoginAttempts.get(ip) || { count: 0, since: now };
+  if (now - attempts.since > 15 * 60 * 1000) Object.assign(attempts, { count: 0, since: now });
+  if (attempts.count >= 8) return res.status(429).send("Demasiados intentos. Esperá 15 minutos.");
+  const account = clientAccounts[username];
+  if (!account?.active || !verificarPasswordCliente(password, account)) {
+    attempts.count++;
+    clientLoginAttempts.set(ip, attempts);
+    return res.redirect("/login?error=1");
+  }
+  clientLoginAttempts.delete(ip);
+  const csrf = crypto.randomBytes(18).toString("base64url");
+  const token = firmarSesionCliente({ u: username, v: Number(account.sessionVersion || 1), csrf, exp: now + 12 * 60 * 60 * 1000 });
+  res.set("Set-Cookie", cookieSesionCliente(req, token, 12 * 60 * 60));
+  const requestedNext = String(req.body.next || "");
+  res.redirect(requestedNext.startsWith("/cliente") && !requestedNext.startsWith("//") ? requestedNext : "/cliente");
+});
+
+app.get("/logout", (req, res) => {
+  res.set("Set-Cookie", [cookieSesionAdmin(req, "", 0), cookieSesionCliente(req, "", 0)]);
+  res.redirect("/login");
+});
+
 function payloadEstadisticasCliente(deviceId) {
   const d = asegurarDevice(deviceId);
   const usageList = eventosUsoDevice(deviceId);
@@ -2654,8 +2728,8 @@ function payloadEstadisticasCliente(deviceId) {
 
 app.get("/cliente/login", (req, res) => {
   if (leerSesionCliente(req)) return res.redirect("/cliente");
-  const error = req.query.error ? `<div class="error">Usuario o contraseña incorrectos.</div>` : "";
-  res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acceso cliente · EVETEC</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#15344b,#06111e 55%);font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#edf8ff}.login{width:min(92vw,430px);background:#0d1d2c;border:1px solid #28445d;border-radius:22px;padding:32px;box-shadow:0 30px 80px #0008}.brand{color:#39d8e7;font-weight:900;letter-spacing:.16em;font-size:13px}h1{margin:8px 0 6px;font-size:30px}p{color:#9cb2c6;margin:0 0 24px}.field{display:grid;gap:7px;margin:14px 0}label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#a9c1d5;font-weight:800}input{width:100%;padding:13px;border-radius:11px;border:1px solid #35516a;background:#081521;color:white;font-size:16px}button{width:100%;border:0;border-radius:11px;padding:14px;background:#35d5e4;color:#03202a;font-weight:900;font-size:15px;cursor:pointer;margin-top:8px}.error{background:#4a1d29;border:1px solid #923649;color:#ffc2ca;padding:11px;border-radius:10px;margin:15px 0}</style></head><body><main class="login"><div class="brand">EVETEC</div><h1>Panel de tu equipo</h1><p>Consultá la actividad en tiempo real y ajustá precios y tiempos.</p>${error}<form method="POST" action="/cliente/login"><input type="hidden" name="next" value="${escaparHtml(String(req.query.next || "/cliente").slice(0, 200))}"><div class="field"><label>Usuario</label><input name="username" autocomplete="username" required autofocus></div><div class="field"><label>Contraseña</label><input type="password" name="password" autocomplete="current-password" required></div><button type="submit">Ingresar</button></form></main></body></html>`);
+  const next = String(req.query.next || "/cliente");
+  res.redirect(`/login?next=${encodeURIComponent(next)}${req.query.error ? "&error=1" : ""}`);
 });
 
 app.post("/cliente/login", (req, res) => {
@@ -2740,7 +2814,7 @@ app.post("/cliente/device/:deviceId/update", verificarCsrfCliente, (req, res) =>
 // =====================================================
 
 app.get("/", (req, res) => {
-  res.redirect("/admin");
+  res.redirect("/login");
 });
 
 app.get("/admin", (req, res) => {
@@ -2980,9 +3054,9 @@ app.get("/admin", (req, res) => {
           <div class="field"><label>Nombre del cliente</label><input name="displayName" id="client-display-name" maxlength="60" required></div>
           <div class="field"><label>Usuario</label><input name="username" id="client-username" pattern="[A-Za-z0-9._-]{3,48}" autocomplete="off" required></div>
           <div class="field wide"><label>Contraseña <span class="hint">(obligatoria al crear; en blanco conserva la actual)</span></label><div style="display:flex;gap:8px"><input name="password" id="client-password" type="password" minlength="10" autocomplete="new-password" style="flex:1"><button class="mini-btn" type="button" id="generate-client-password">Generar</button></div></div>
-          <div class="field wide"><label>Equipos asignados</label><div class="switches">${deviceIds.map(deviceId => `<label class="check"><input type="checkbox" name="deviceIds" value="${escaparHtml(deviceId)}" data-client-device="${escaparHtml(deviceId)}"> ${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</label>`).join("")}</div></div>
+          <div class="field wide"><label>Equipos asignados <span class="hint">(marcar agrega; desmarcar quita)</span></label><div class="switches">${deviceIds.map(deviceId => `<label class="check"><input type="checkbox" name="deviceIds" value="${escaparHtml(deviceId)}" data-client-device="${escaparHtml(deviceId)}"> ${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</label>`).join("")}</div></div>
         </div>
-        <div class="actions"><button class="btn primary" type="submit">Guardar acceso</button><a class="btn secondary" href="/cliente/login" target="_blank" rel="noopener">Abrir portal del cliente</a></div>
+        <div class="actions"><button class="btn primary" type="submit">Guardar acceso</button><a class="btn secondary" href="/login" target="_blank" rel="noopener">Abrir acceso unificado</a></div>
       </form>
       <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Cliente</th><th>Equipos</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${clientAccountRows || `<tr><td colspan="4" class="empty">Todavía no hay accesos de clientes.</td></tr>`}</tbody></table></div>
     </section>
@@ -3503,7 +3577,7 @@ app.post("/admin/client-account/save", (req, res) => {
   const requestedDevices = Array.isArray(req.body.deviceIds) ? req.body.deviceIds : (req.body.deviceIds ? [req.body.deviceIds] : []);
   const deviceIds = [...new Set(requestedDevices.map(id => String(id || "").trim().toUpperCase()).filter(id => devices[id]))];
   const existing = clientAccounts[originalUsername || username];
-  if (username.length < 3 || !displayName || !deviceIds.length) return res.status(400).send("Completá nombre, usuario válido y al menos un equipo.");
+  if (username.length < 3 || !displayName) return res.status(400).send("Completá nombre y un usuario válido.");
   if (!existing && password.length < 10) return res.status(400).send("La contraseña inicial debe tener al menos 10 caracteres.");
   if (username !== originalUsername && clientAccounts[username]) return res.status(409).send("Ese usuario ya existe.");
   const account = {
@@ -3526,7 +3600,7 @@ app.post("/admin/client-account/save", (req, res) => {
   if (originalUsername && originalUsername !== username) delete clientAccounts[originalUsername];
   clientAccounts[username] = account;
   guardarDatos();
-  res.redirect(`/admin?device=${encodeURIComponent(deviceIds[0])}`);
+  res.redirect(deviceIds[0] ? `/admin?device=${encodeURIComponent(deviceIds[0])}` : "/admin");
 });
 
 app.post("/admin/client-account/toggle", (req, res) => {
