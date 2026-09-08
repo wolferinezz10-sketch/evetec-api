@@ -4,7 +4,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test:duration": "node scripts/test-duration-fields.mjs"
+    "test:duration": "node scripts/test-duration-fields.mjs",
+    "test:vending": "node scripts/test-vending.mjs"
   },
   "dependencies": {
     "cors": "^2.8.6",

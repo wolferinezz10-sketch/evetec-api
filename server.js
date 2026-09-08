@@ -19,10 +19,13 @@ const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || "";
 const EVETEC_MP_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN || "";
 const COMISION_EVETEC_PORCENTAJE = Number(process.env.COMISION_EVETEC || 15);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const ADMIN_USERNAME = normalizarUsuarioCliente(process.env.ADMIN_USERNAME || "Admin2");
 const CLIENT_SESSION_SECRET = process.env.CLIENT_SESSION_SECRET || ADMIN_PASSWORD;
 const DEVICE_API_KEY = process.env.DEVICE_API_KEY || "";
+const VENDING_DEVICE_API_KEY = process.env.VENDING_DEVICE_API_KEY || DEVICE_API_KEY;
 const PROTOTYPE_DEVICE_ID = "ASPIRADORA_BASIC_001";
 const PLUSH_DEVICE_ID = "PELUCHE_001";
+const VENDING_DEVICE_ID = "EXPENDEDORA_001";
 const MAX_PARTICIPANTS = 8;
 const PARTICIPANT_NUMBERS = Array.from({ length: MAX_PARTICIPANTS }, (_, index) => index + 1);
 
@@ -97,6 +100,45 @@ function statsIniciales() {
     motorMsVendidos: 0,
     ultimosPagos: []
   };
+}
+
+function requireVendingDevice(req, res, next) {
+  if (!VENDING_DEVICE_API_KEY) return res.status(503).json({ ok: false, error: "vending_device_key_not_configured" });
+  if (comparacionSegura(req.get("x-device-key"), VENDING_DEVICE_API_KEY)) return next();
+  return res.status(401).json({ ok: false, error: "device_unauthorized" });
+}
+
+function firmarAutorizacionVending(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = crypto.createHmac("sha256", CLIENT_SESSION_SECRET).update(body).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function leerAutorizacionVending(token) {
+  try {
+    const [body, signature] = String(token || "").split(".");
+    const expected = crypto.createHmac("sha256", CLIENT_SESSION_SECRET).update(body).digest("base64url");
+    if (!comparacionSegura(signature, expected)) return null;
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!payload.exp || Date.now() > Number(payload.exp)) return null;
+    return payload;
+  } catch (_) { return null; }
+}
+
+function catalogoVendingInicial() {
+  const destacados = ["91", "92", "93", "94"];
+  const normales = ["11","12","13","14","15","16","17","18","21","22","23","24","25","26","27","28","31","32","33","34","35","36","37","38","41","42","43","44","45","46","47","48"];
+  return [...destacados, ...normales].map((codigo, index) => ({
+    slot: index + 1,
+    productId: `PRODUCTO_${codigo}`,
+    codigo,
+    nombre: `Producto ${codigo}`,
+    monto: 1000,
+    imagenUrl: "",
+    color: ["#F43F5E", "#F59E0B", "#0EA5E9", "#8B5CF6"][index % 4],
+    stock: 10,
+    activo: true
+  }));
 }
 
 let configGlobal = {
@@ -199,6 +241,11 @@ function nuevoDevice(tipo = "premium") {
     pagadorComisionMp: "proportional",
     configuracionServicio: null,
     configuracionGachapon: null,
+    configuracionVending: tipo === "vending" ? {
+      nombre: "Expendedora EVETEC",
+      version: 1,
+      productos: catalogoVendingInicial()
+    } : null,
     paisOperacion: "AR",
 
     stats: statsIniciales()
@@ -346,6 +393,7 @@ function claseTipoDevice(tipo) {
   if (tipo === "basic") return "basic";
   if (tipo === "gachapon") return "gachapon";
   if (tipo === "arcade") return "arcade";
+  if (tipo === "vending") return "vending";
   return "premium";
 }
 
@@ -353,11 +401,14 @@ function etiquetaTipoDevice(tipo) {
   if (tipo === "basic") return "BASICO";
   if (tipo === "gachapon") return "GACHAPON";
   if (tipo === "arcade") return "ARCADE";
+  if (tipo === "vending") return "EXPENDEDORA";
   return "PREMIUM";
 }
 
 function detectarTipoDevice(deviceId) {
   const id = String(deviceId || "").toUpperCase();
+
+  if (id.includes("EXPENDEDORA") || id.includes("VENDING")) return "vending";
 
   if (id.includes("GALAGA") || id.includes("GAME") || id.includes("ARCADE")) {
     return "arcade";
@@ -593,6 +644,7 @@ asegurarEstructuraConfig();
 if (deduplicarEventosUso()) guardarDatos();
 asegurarDevice(PROTOTYPE_DEVICE_ID);
 asegurarDevice(PLUSH_DEVICE_ID);
+asegurarDevice(VENDING_DEVICE_ID);
 
 function asegurarDevice(deviceId) {
   const id = String(deviceId || "ASPIRADORA_001").trim().toUpperCase() || "ASPIRADORA_001";
@@ -698,6 +750,32 @@ function asegurarDevice(deviceId) {
     d.configuracionGachapon.segundos_por_jugada = Math.max(1, Math.min(600,
       Number(d.configuracionGachapon.segundos_por_jugada || 30)));
   }
+  if (d.tipo === "vending") {
+    if (!d.configuracionVending || typeof d.configuracionVending !== "object") {
+      d.configuracionVending = { nombre: "Expendedora EVETEC", version: 1, productos: catalogoVendingInicial() };
+    }
+    const defaults = catalogoVendingInicial();
+    const existing = Array.isArray(d.configuracionVending.productos) ? d.configuracionVending.productos : [];
+    d.configuracionVending.nombre = String(d.configuracionVending.nombre || "Expendedora EVETEC").slice(0, 60);
+    d.configuracionVending.version = Math.max(1, Number(d.configuracionVending.version || 1));
+    d.configuracionVending.productos = defaults.map((fallback, index) => {
+      const product = existing[index] || {};
+      const codigo = /^[1-9]{2}$/.test(String(product.codigo || "")) ? String(product.codigo) : fallback.codigo;
+      return {
+        ...fallback,
+        ...product,
+        slot: index + 1,
+        productId: String(product.productId || `PRODUCTO_${codigo}`).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40),
+        codigo,
+        nombre: String(product.nombre || fallback.nombre).slice(0, 40),
+        monto: Math.max(1, Number(product.monto || fallback.monto)),
+        imagenUrl: String(product.imagenUrl || "").slice(0, 500),
+        color: /^#[0-9A-F]{6}$/i.test(String(product.color || "")) ? String(product.color).toUpperCase() : fallback.color,
+        stock: Math.max(0, Math.floor(Number(product.stock ?? fallback.stock))),
+        activo: product.activo !== false
+      };
+    });
+  }
   if (!['AR', 'BR'].includes(d.paisOperacion)) d.paisOperacion = 'AR';
   if (!d.stats) d.stats = statsIniciales();
   if (!Array.isArray(d.stats.ultimosPagos)) d.stats.ultimosPagos = [];
@@ -764,6 +842,7 @@ function configuracionGachaponDevice(deviceId) {
 
 function nombreVisibleDevice(deviceId) {
   const d = asegurarDevice(deviceId);
+  if (d.tipo === "vending") return d.configuracionVending?.nombre || "Expendedora EVETEC";
   return d.tipo === "gachapon"
     ? configuracionGachaponDevice(deviceId).nombre
     : d.configuracionServicio?.nombre;
@@ -1192,6 +1271,24 @@ function normalizarPedidoPago(body) {
   const device_id = String(body.device_id || body.deviceId || "ASPIRADORA_001").toUpperCase();
   const d = asegurarDevice(device_id);
 
+  if (d.tipo === "vending") {
+    const productId = String(body.product_id || body.productId || "");
+    const producto = d.configuracionVending.productos.find(product =>
+      product.productId === productId && product.activo && Number(product.stock) > 0);
+    if (!producto) throw new Error("Producto no disponible");
+    return {
+      device_id,
+      modoSistema: "vending",
+      plan_id: producto.productId,
+      plan_nombre: producto.nombre,
+      origen: "vending",
+      monto: Number(producto.monto),
+      segundos: 1,
+      product_id: producto.productId,
+      vend_code: producto.codigo
+    };
+  }
+
   if (d.tipo === "arcade" || String(body.tipo || body.modo || "").toLowerCase().includes("arcade") || String(body.tipo || body.modo || "").toLowerCase().includes("galaga")) {
     const plan = buscarPlanArcade(body);
 
@@ -1557,6 +1654,8 @@ async function crearPagoMercadoPago(pedido) {
       creditos: pedido.creditos || 0,
       modo_activacion: pedido.modo_activacion || "",
       segundos_por_jugada: pedido.segundos_por_jugada || 0,
+      product_id: pedido.product_id || "",
+      vend_code: pedido.vend_code || "",
       monto_total: pedido.monto,
       comision_evetec: comision,
       neto_duenio_estimado: netoDuenioEstimado,
@@ -1607,6 +1706,8 @@ async function crearPagoMercadoPago(pedido) {
     creditos: pedido.creditos || 0,
     modo_activacion: pedido.modo_activacion || "",
     segundos_por_jugada: pedido.segundos_por_jugada || 0,
+    product_id: pedido.product_id || "",
+    vend_code: pedido.vend_code || "",
     comisionEvetec: comision,
     netoDuenioEstimado,
     modoCobro: d.modoCobro,
@@ -2718,7 +2819,7 @@ app.post("/login", (req, res) => {
   if (!CLIENT_SESSION_SECRET) return res.status(503).send("Acceso no configurado.");
   const username = normalizarUsuarioCliente(req.body.username);
   const password = String(req.body.password || "");
-  if (username === "admin" && comparacionSegura(password, ADMIN_PASSWORD)) {
+  if ((username === "admin" || username === ADMIN_USERNAME) && comparacionSegura(password, ADMIN_PASSWORD)) {
     const token = firmarSesionAdmin({ role: "admin", exp: Date.now() + 12 * 60 * 60 * 1000 });
     res.set("Set-Cookie", cookieSesionAdmin(req, token, 12 * 60 * 60));
     return res.redirect("/admin");
@@ -2868,6 +2969,7 @@ app.get("/admin", (req, res) => {
   const deviceIds = Object.keys(devices).sort();
   const id = requestedId && devices[requestedId] ? requestedId : (devices[PROTOTYPE_DEVICE_ID] ? PROTOTYPE_DEVICE_ID : deviceIds[0]);
   const d = asegurarDevice(id);
+  if (d.tipo === "vending") return res.redirect(`/admin/vending?device=${encodeURIComponent(id)}`);
   const cfg = d.tipo === "gachapon" ? configuracionGachaponDevice(id) : configuracionServicioDevice(id);
   const usageList = eventosUsoDevice(id);
   const stats = usageList.length ? statsDesdeUso(id) : (d.stats || statsIniciales());
@@ -2924,7 +3026,8 @@ app.get("/admin", (req, res) => {
     : 0;
   const deviceTabs = deviceIds.map(deviceId => {
     const tabDevice = asegurarDevice(deviceId);
-    return `<a class="device-tab ${deviceId === id ? "active" : ""}" href="/admin?device=${encodeURIComponent(deviceId)}"><span class="tab-dot ${tabDevice.online ? "online-dot" : ""}"></span><span>${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`;
+    const href = tabDevice.tipo === "vending" ? `/admin/vending?device=${encodeURIComponent(deviceId)}` : `/admin?device=${encodeURIComponent(deviceId)}`;
+    return `<a class="device-tab ${deviceId === id ? "active" : ""}" href="${href}"><span class="tab-dot ${tabDevice.online ? "online-dot" : ""}"></span><span>${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`;
   }).join("");
   const clientAccountRows = Object.values(clientAccounts).sort((a, b) => a.displayName.localeCompare(b.displayName)).map(account => `
     <tr>
@@ -3106,7 +3209,7 @@ app.get("/admin", (req, res) => {
       </form>
       <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Cliente</th><th>Equipos</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${clientAccountRows || `<tr><td colspan="4" class="empty">Todavía no hay accesos de clientes.</td></tr>`}</tbody></table></div>
     </section>
-    <details class="card module-add"><summary>+ Incorporar otro módulo</summary><form class="new-device-form" method="POST" action="/admin/device/add"><div class="field"><label>Identificador único</label><input name="deviceId" placeholder="PELUCHE_001" pattern="[A-Za-z0-9_-]{3,40}" required></div><div class="field"><label>Tipo</label><select name="tipo"><option value="basic">Servicio temporizado</option><option value="gachapon">Máquina de peluches / premios</option><option value="arcade">Arcade / créditos</option><option value="premium">Planes múltiples</option></select></div><button class="btn primary" type="submit">Crear módulo</button></form></details>
+    <details class="card module-add"><summary>+ Incorporar otro módulo</summary><form class="new-device-form" method="POST" action="/admin/device/add"><div class="field"><label>Identificador único</label><input name="deviceId" placeholder="PELUCHE_001" pattern="[A-Za-z0-9_-]{3,40}" required></div><div class="field"><label>Tipo</label><select name="tipo"><option value="basic">Servicio temporizado</option><option value="gachapon">Máquina de peluches / premios</option><option value="arcade">Arcade / créditos</option><option value="vending">Expendedora con productos</option><option value="premium">Planes múltiples</option></select></div><button class="btn primary" type="submit">Crear módulo</button></form></details>
     <div class="footer">Los cambios de precio y tiempos son consultados automáticamente por la pantalla. Base: ${escaparHtml(PUBLIC_BASE_URL)}</div>
       <script>
       const participantCount=document.getElementById('participant-count');
@@ -3129,6 +3232,53 @@ app.get("/admin", (req, res) => {
       setInterval(async()=>{try{const r=await fetch('/admin/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const s=await r.json();const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2});document.getElementById('mp-fees').textContent=money(s.comisionesMp);document.getElementById('net-after-mp').textContent=money(s.netoDespuesMp);document.getElementById('mp-rate').textContent=Number(s.tasaMpEfectiva||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';document.querySelectorAll('[data-participant-total]').forEach(element=>{element.textContent=money((s.participantTotals||{})[element.dataset.participantTotal]||0)})}catch(_){ }},5000);
     </script>
   </main></body></html>`);
+});
+
+app.get("/admin/vending", (req, res) => {
+  const id = String(req.query.device || VENDING_DEVICE_ID).trim().toUpperCase();
+  const d = asegurarDevice(id);
+  if (d.tipo !== "vending") return res.redirect(adminDeviceUrl(id));
+  const cfg = d.configuracionVending;
+  const productCards = cfg.productos.map((product, index) => `
+    <article class="product">
+      <div class="preview" style="--accent:${escaparHtml(product.color)}">${product.imagenUrl ? `<img src="${escaparHtml(product.imagenUrl)}" alt="">` : `<b>${escaparHtml(product.codigo)}</b>`}</div>
+      <div class="fields">
+        <label>Producto<input name="name_${index}" value="${escaparHtml(product.nombre)}" maxlength="40" required></label>
+        <div class="row"><label>Código<input name="code_${index}" value="${escaparHtml(product.codigo)}" pattern="[1-9]{2}" maxlength="2" required></label><label>Precio ARS<input name="price_${index}" type="number" min="1" step="0.01" value="${Number(product.monto)}" required></label></div>
+        <div class="row"><label>Stock<input name="stock_${index}" type="number" min="0" step="1" value="${Number(product.stock)}"></label><label>Color<input name="color_${index}" type="color" value="${escaparHtml(product.color)}"></label></div>
+        <label>URL de imagen<input name="image_${index}" value="${escaparHtml(product.imagenUrl)}" maxlength="500" placeholder="https://..."></label>
+        <label class="check"><input name="enabled_${index}" type="checkbox" ${product.activo ? "checked" : ""}> Disponible</label>
+      </div>
+    </article>`).join("");
+  res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EVETEC | Expendedora</title><style>
+    :root{color-scheme:dark;--bg:#06111f;--panel:#102033;--line:#294158;--text:#f5f8fc;--muted:#91a4b7;--blue:#28c7e2;--green:#43dc90}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#153854,transparent 35%),var(--bg);color:var(--text);font:15px Segoe UI,Arial,sans-serif}main{width:min(1240px,calc(100% - 28px));margin:auto;padding:28px 0 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:18px}.brand{letter-spacing:.2em;color:var(--blue);font-weight:900}h1{margin:5px 0}.muted{color:var(--muted)}nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0}.tab,.button{display:inline-flex;padding:11px 15px;border-radius:10px;border:1px solid var(--line);background:#142a40;color:var(--text);text-decoration:none;font-weight:800}.active,.button{background:var(--blue);color:#021319;border-color:transparent}.status{padding:9px 13px;border-radius:999px;background:${d.online ? "#123d2d" : "#42202a"};color:${d.online ? "#85f2b9" : "#ffb4bd"};font-weight:800}.toolbar{display:grid;grid-template-columns:1fr auto;gap:12px;background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:16px;margin-bottom:16px}input{width:100%;padding:10px;background:#071624;color:var(--text);border:1px solid var(--line);border-radius:9px;font:inherit}input[type=color],input[type=checkbox]{width:auto}.levels{display:grid;gap:12px}.level{display:grid;grid-template-columns:repeat(8,1fr);gap:10px}.level.featured{grid-template-columns:repeat(4,1fr)}.product{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden}.preview{height:105px;display:grid;place-items:center;background:linear-gradient(145deg,var(--accent),#071624);font-size:30px}.preview img{width:100%;height:100%;object-fit:contain}.fields{padding:11px;display:grid;gap:8px}.fields label{display:grid;gap:4px;color:var(--muted);font-size:11px}.row{display:grid;grid-template-columns:1fr 1.4fr;gap:7px}.check{display:flex!important;align-items:center;gap:7px}.save{position:sticky;bottom:12px;display:flex;justify-content:flex-end;margin-top:18px}.button{border:0;cursor:pointer;font-size:16px}@media(max-width:1050px){.level,.level.featured{grid-template-columns:repeat(4,1fr)}}@media(max-width:650px){.level,.level.featured{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}}
+  </style></head><body><main><header><div><div class="brand">EVETEC</div><h1>${escaparHtml(cfg.nombre)}</h1><div class="muted">${escaparHtml(id)} · catálogo v${Number(cfg.version)}</div></div><span class="status">${d.online ? "Tableta online" : "Tableta offline"}</span></header>
+  <nav><a class="tab active" href="/admin/vending?device=${encodeURIComponent(id)}">Productos y precios</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}">Cobros y módulos</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}#client-account-form">Accesos de clientes</a><a class="tab" href="/logout">Salir</a></nav>
+  <form method="POST" action="/admin/vending/${encodeURIComponent(id)}/update"><section class="toolbar"><label>Nombre visible<input name="machineName" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></label><div><b>Distribución de pantalla</b><div class="muted">Primera fila: 4 · siguientes: 8 + 8 + 8 + 8</div></div></section>
+  <div class="levels"><section class="level featured">${productCards.split('</article>').slice(0,4).map(x=>x+'</article>').join('')}</section>${[4,12,20,28].map(start => `<section class="level">${productCards.split('</article>').slice(start,start+8).map(x=>x+'</article>').join('')}</section>`).join('')}</div>
+  <div class="save"><button class="button" type="submit">Guardar y actualizar tableta</button></div></form></main></body></html>`);
+});
+
+app.post("/admin/vending/:deviceId/update", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const d = asegurarDevice(id);
+  if (d.tipo !== "vending") return res.status(404).send("Expendedora no encontrada");
+  d.configuracionVending.nombre = String(req.body.machineName || "Expendedora EVETEC").slice(0, 60);
+  d.configuracionVending.productos.forEach((product, index) => {
+    const code = String(req.body[`code_${index}`] || "");
+    if (/^[1-9]{2}$/.test(code)) product.codigo = code;
+    product.productId = `PRODUCTO_${product.codigo}`;
+    product.nombre = String(req.body[`name_${index}`] || product.nombre).slice(0, 40);
+    product.monto = Math.max(1, Number(req.body[`price_${index}`] || product.monto));
+    product.stock = Math.max(0, Math.floor(Number(req.body[`stock_${index}`] || 0)));
+    product.imagenUrl = String(req.body[`image_${index}`] || "").slice(0, 500);
+    const color = String(req.body[`color_${index}`] || "").toUpperCase();
+    if (/^#[0-9A-F]{6}$/.test(color)) product.color = color;
+    product.activo = req.body[`enabled_${index}`] === "on";
+  });
+  d.configuracionVending.version = Number(d.configuracionVending.version || 0) + 1;
+  guardarDatos();
+  res.redirect(`/admin/vending?device=${encodeURIComponent(id)}`);
 });
 
 function renderLegacyAdminDisabled(req, res) {
@@ -4144,9 +4294,11 @@ app.post("/admin/device/add", (req, res) => {
   const tipo = String(req.body.tipo || detectarTipoDevice(id)).toLowerCase();
 
   if (id && !devices[id]) {
-    devices[id] = nuevoDevice(["basic", "premium", "gachapon", "arcade"].includes(tipo) ? tipo : detectarTipoDevice(id));
+    devices[id] = nuevoDevice(["basic", "premium", "gachapon", "arcade", "vending"].includes(tipo) ? tipo : detectarTipoDevice(id));
     const d = asegurarDevice(id);
-    if (d.tipo === "gachapon") {
+    if (d.tipo === "vending") {
+      d.configuracionVending.nombre = id.replace(/[_-]+/g, " ");
+    } else if (d.tipo === "gachapon") {
       d.configuracionGachapon.nombre = id.includes("PELUCHE") ? "Máquina de Peluches 1" : id.replace(/[_-]+/g, " ");
     } else {
       d.configuracionServicio.nombre = id.replace(/[_-]+/g, " ");
@@ -4274,4 +4426,95 @@ async function startServer() {
 startServer().catch(err => {
   console.error("No se pudo iniciar el servidor:", err);
   process.exit(1);
+});
+
+// =====================================================
+// EXPENDEDORA EVETEC - AISLADA DE LOS MODULOS EXISTENTES
+// =====================================================
+
+app.get("/vending/config/:deviceId", requireVendingDevice, (req, res) => {
+  const deviceId = String(req.params.deviceId || "").trim().toUpperCase();
+  const d = asegurarDevice(deviceId);
+  if (d.tipo !== "vending") return res.status(404).json({ ok: false, error: "vending_not_found" });
+  d.online = true;
+  d.ultimaConexion = new Date().toISOString();
+  guardarDatos();
+  res.set("Cache-Control", "no-store");
+  res.json({
+    ok: true, deviceId, nombre: d.configuracionVending.nombre,
+    version: d.configuracionVending.version, activo: estadoOperativo(deviceId).ok,
+    productos: d.configuracionVending.productos.map(product => ({
+      slot: product.slot, productId: product.productId, code: product.codigo,
+      name: product.nombre, priceCents: Math.round(Number(product.monto) * 100),
+      price: `$${Number(product.monto).toLocaleString("es-AR")}`,
+      imageUrl: product.imagenUrl, accent: product.color, stock: product.stock,
+      enabled: product.activo && product.stock > 0
+    }))
+  });
+});
+
+app.post("/vending/create-payment", requireVendingDevice, async (req, res) => {
+  try {
+    const deviceId = String(req.body.device_id || req.body.deviceId || "").trim().toUpperCase();
+    const d = asegurarDevice(deviceId);
+    if (d.tipo !== "vending") return res.status(404).json({ ok: false, error: "vending_not_found" });
+    const pedido = normalizarPedidoPago({ ...req.body, device_id: deviceId });
+    const pago = await crearPagoMercadoPago(pedido);
+    const local = pagosCreados[pago.id];
+    local.product_id = pedido.product_id;
+    local.vend_code = pedido.vend_code;
+    local.vendDelivered = false;
+    guardarDatos();
+    res.json({ ok: true, paymentId: pago.id, link: pago.link,
+      amountCents: Math.round(Number(pago.monto) * 100), expiresIn: 600, state: "pending" });
+  } catch (err) {
+    console.error("Error /vending/create-payment:", err.message);
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/vending/payment/:paymentId", requireVendingDevice, async (req, res) => {
+  const paymentId = String(req.params.paymentId || "");
+  const deviceId = String(req.query.deviceId || req.query.device_id || "").trim().toUpperCase();
+  const local = pagosCreados[paymentId];
+  if (!local || local.device_id !== deviceId || local.tipo !== "vending") {
+    return res.status(404).json({ ok: false, error: "payment_not_found" });
+  }
+  const state = await buscarEstadoMercadoPago(paymentId);
+  const approved = state.estado === "approved" && state.verificado === true && local.verificado === true;
+  if (!approved) return res.json({ ok: true, state: state.estado || "pending", detail: state.detalle || "" });
+  if (local.vendDelivered) return res.json({ ok: true, state: "delivered" });
+  if (!local.vendAuthorizationPayload || Number(local.vendAuthorizationPayload.exp) <= Date.now()) {
+    local.vendAuthorizationPayload = { paymentId, deviceId, productId: local.product_id,
+      code: local.vend_code, nonce: crypto.randomUUID(), exp: Date.now() + 2 * 60 * 1000 };
+    local.vendAuthorization = firmarAutorizacionVending(local.vendAuthorizationPayload);
+    guardarDatos();
+  }
+  res.json({ ok: true, state: "approved", ...local.vendAuthorizationPayload,
+    authorization: local.vendAuthorization });
+});
+
+app.post("/vending/delivered", requireVendingDevice, (req, res) => {
+  const payload = leerAutorizacionVending(req.body.authorization);
+  const paymentId = String(req.body.paymentId || "");
+  const deviceId = String(req.body.deviceId || "").trim().toUpperCase();
+  if (!payload || payload.paymentId !== paymentId || payload.deviceId !== deviceId) {
+    return res.status(403).json({ ok: false, error: "invalid_vend_authorization" });
+  }
+  const local = pagosCreados[paymentId];
+  if (!local || local.device_id !== deviceId || local.vendAuthorization !== req.body.authorization) {
+    return res.status(409).json({ ok: false, error: "authorization_not_active" });
+  }
+  if (local.vendDelivered) return res.json({ ok: true, state: "delivered", alreadyConfirmed: true });
+  if (req.body.ackFirst !== true || req.body.ackSecond !== true) {
+    return res.status(400).json({ ok: false, error: "receiver_ack_required" });
+  }
+  local.vendDelivered = true;
+  local.vendDeliveredAt = new Date().toISOString();
+  const d = asegurarDevice(deviceId);
+  const product = d.configuracionVending.productos.find(item => item.productId === local.product_id);
+  if (product) product.stock = Math.max(0, Number(product.stock || 0) - 1);
+  if (d.registroVentasHabilitado !== false) registrarPagoVerificado(local, local.payment_id);
+  guardarDatos();
+  res.json({ ok: true, state: "delivered" });
 });
