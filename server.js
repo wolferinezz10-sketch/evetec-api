@@ -807,6 +807,7 @@ async function iniciarPersistencia() {
       asegurarEstructuraConfig();
       asegurarDevice(PROTOTYPE_DEVICE_ID);
       asegurarDevice(PLUSH_DEVICE_ID);
+      asegurarDevice(VENDING_DEVICE_ID);
       deduplicarEventosUso();
       console.log("Datos EVETEC restaurados desde PostgreSQL");
     }
