@@ -1048,7 +1048,10 @@ function estadoOperativo(deviceId) {
 function obtenerTokenParaCobrar(deviceId) {
   const d = asegurarDevice(deviceId);
 
-  if (d.modoCobro === "evetec") {
+  // La expendedora puede operar de inmediato con la cuenta EVETEC mientras
+  // todavía no tenga una cuenta de propietario vinculada. Los demás módulos
+  // conservan exactamente su política de cobro actual.
+  if (d.modoCobro === "evetec" || (d.tipo === "vending" && !cuentaExternaLista(d))) {
     return {
       token: EVETEC_MP_TOKEN,
       refreshToken: null,
