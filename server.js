@@ -801,6 +801,14 @@ async function iniciarPersistencia() {
       payload JSONB NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
+    await databasePool.query(`CREATE TABLE IF NOT EXISTS evetec_vending_images (
+      device_id TEXT NOT NULL,
+      slot INTEGER NOT NULL CHECK (slot BETWEEN 1 AND 36),
+      mime_type TEXT NOT NULL,
+      image_data BYTEA NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (device_id, slot)
+    )`);
     const result = await databasePool.query("SELECT payload FROM evetec_state WHERE id = 'main'");
     if (result.rows[0]?.payload) {
       aplicarSnapshot(result.rows[0].payload);
@@ -3247,17 +3255,98 @@ app.get("/admin/vending", (req, res) => {
         <label>Producto<input name="name_${index}" value="${escaparHtml(product.nombre)}" maxlength="40" required></label>
         <div class="row"><label>Código<input name="code_${index}" value="${escaparHtml(product.codigo)}" pattern="[1-9]{2}" maxlength="2" required></label><label>Precio ARS<input name="price_${index}" type="number" min="1" step="0.01" value="${Number(product.monto)}" required></label></div>
         <div class="row"><label>Stock<input name="stock_${index}" type="number" min="0" step="1" value="${Number(product.stock)}"></label><label>Color<input name="color_${index}" type="color" value="${escaparHtml(product.color)}"></label></div>
-        <label>URL de imagen<input name="image_${index}" value="${escaparHtml(product.imagenUrl)}" maxlength="500" placeholder="https://..."></label>
+        <label>Imagen desde archivo<input type="file" accept="image/png,image/jpeg,image/webp" data-upload-slot="${index + 1}"></label>
+        <div class="upload-status" data-upload-status="${index + 1}">PNG, JPG o WebP · máximo 700 KB</div>
+        <label>O usar URL externa<input name="image_${index}" value="${escaparHtml(product.imagenUrl)}" maxlength="500" placeholder="https://..."></label>
         <label class="check"><input name="enabled_${index}" type="checkbox" ${product.activo ? "checked" : ""}> Disponible</label>
       </div>
     </article>`).join("");
   res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EVETEC | Expendedora</title><style>
-    :root{color-scheme:dark;--bg:#06111f;--panel:#102033;--line:#294158;--text:#f5f8fc;--muted:#91a4b7;--blue:#28c7e2;--green:#43dc90}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#153854,transparent 35%),var(--bg);color:var(--text);font:15px Segoe UI,Arial,sans-serif}main{width:min(1240px,calc(100% - 28px));margin:auto;padding:28px 0 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:18px}.brand{letter-spacing:.2em;color:var(--blue);font-weight:900}h1{margin:5px 0}.muted{color:var(--muted)}nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0}.tab,.button{display:inline-flex;padding:11px 15px;border-radius:10px;border:1px solid var(--line);background:#142a40;color:var(--text);text-decoration:none;font-weight:800}.active,.button{background:var(--blue);color:#021319;border-color:transparent}.status{padding:9px 13px;border-radius:999px;background:${d.online ? "#123d2d" : "#42202a"};color:${d.online ? "#85f2b9" : "#ffb4bd"};font-weight:800}.toolbar{display:grid;grid-template-columns:1fr auto;gap:12px;background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:16px;margin-bottom:16px}input{width:100%;padding:10px;background:#071624;color:var(--text);border:1px solid var(--line);border-radius:9px;font:inherit}input[type=color],input[type=checkbox]{width:auto}.levels{display:grid;gap:12px}.level{display:grid;grid-template-columns:repeat(8,1fr);gap:10px}.level.featured{grid-template-columns:repeat(4,1fr)}.product{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden}.preview{height:105px;display:grid;place-items:center;background:linear-gradient(145deg,var(--accent),#071624);font-size:30px}.preview img{width:100%;height:100%;object-fit:contain}.fields{padding:11px;display:grid;gap:8px}.fields label{display:grid;gap:4px;color:var(--muted);font-size:11px}.row{display:grid;grid-template-columns:1fr 1.4fr;gap:7px}.check{display:flex!important;align-items:center;gap:7px}.save{position:sticky;bottom:12px;display:flex;justify-content:flex-end;margin-top:18px}.button{border:0;cursor:pointer;font-size:16px}@media(max-width:1050px){.level,.level.featured{grid-template-columns:repeat(4,1fr)}}@media(max-width:650px){.level,.level.featured{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}}
+    :root{color-scheme:dark;--bg:#06111f;--panel:#102033;--line:#294158;--text:#f5f8fc;--muted:#91a4b7;--blue:#28c7e2;--green:#43dc90}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#153854,transparent 35%),var(--bg);color:var(--text);font:15px Segoe UI,Arial,sans-serif}main{width:min(1240px,calc(100% - 28px));margin:auto;padding:28px 0 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:18px}.brand{letter-spacing:.2em;color:var(--blue);font-weight:900}h1{margin:5px 0}.muted{color:var(--muted)}nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0}.tab,.button{display:inline-flex;padding:11px 15px;border-radius:10px;border:1px solid var(--line);background:#142a40;color:var(--text);text-decoration:none;font-weight:800}.active,.button{background:var(--blue);color:#021319;border-color:transparent}.status{padding:9px 13px;border-radius:999px;background:${d.online ? "#123d2d" : "#42202a"};color:${d.online ? "#85f2b9" : "#ffb4bd"};font-weight:800}.toolbar{display:grid;grid-template-columns:1fr auto;gap:12px;background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:16px;margin-bottom:16px}input{width:100%;padding:10px;background:#071624;color:var(--text);border:1px solid var(--line);border-radius:9px;font:inherit}input[type=color],input[type=checkbox]{width:auto}.levels{display:grid;gap:12px}.level{display:grid;grid-template-columns:repeat(8,1fr);gap:10px}.level.featured{grid-template-columns:repeat(4,1fr)}.product{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden}.preview{height:105px;display:grid;place-items:center;background:linear-gradient(145deg,var(--accent),#071624);font-size:30px}.preview img{width:100%;height:100%;object-fit:contain}.fields{padding:11px;display:grid;gap:8px}.fields label{display:grid;gap:4px;color:var(--muted);font-size:11px}.row{display:grid;grid-template-columns:1fr 1.4fr;gap:7px}.check{display:flex!important;align-items:center;gap:7px}.upload-status{min-height:16px;color:var(--muted);font-size:10px}.upload-status.ok{color:var(--green)}.upload-status.error{color:#ff9da8}.save{position:sticky;bottom:12px;display:flex;justify-content:flex-end;margin-top:18px}.button{border:0;cursor:pointer;font-size:16px}@media(max-width:1050px){.level,.level.featured{grid-template-columns:repeat(4,1fr)}}@media(max-width:650px){.level,.level.featured{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}}
   </style></head><body><main><header><div><div class="brand">EVETEC</div><h1>${escaparHtml(cfg.nombre)}</h1><div class="muted">${escaparHtml(id)} · catálogo v${Number(cfg.version)}</div></div><span class="status">${d.online ? "Tableta online" : "Tableta offline"}</span></header>
   <nav><a class="tab active" href="/admin/vending?device=${encodeURIComponent(id)}">Productos y precios</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}">Cobros y módulos</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}#client-account-form">Accesos de clientes</a><a class="tab" href="/logout">Salir</a></nav>
   <form method="POST" action="/admin/vending/${encodeURIComponent(id)}/update"><section class="toolbar"><label>Nombre visible<input name="machineName" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></label><div><b>Distribución de pantalla</b><div class="muted">Primera fila: 4 · siguientes: 8 + 8 + 8 + 8</div></div></section>
   <div class="levels"><section class="level featured">${productCards.split('</article>').slice(0,4).map(x=>x+'</article>').join('')}</section>${[4,12,20,28].map(start => `<section class="level">${productCards.split('</article>').slice(start,start+8).map(x=>x+'</article>').join('')}</section>`).join('')}</div>
-  <div class="save"><button class="button" type="submit">Guardar y actualizar tableta</button></div></form></main></body></html>`);
+  <div class="save"><button class="button" type="submit">Guardar y actualizar tableta</button></div></form>
+  <script>
+    document.querySelectorAll('[data-upload-slot]').forEach(input => input.addEventListener('change', async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const slot = input.dataset.uploadSlot;
+      const status = document.querySelector('[data-upload-status="' + slot + '"]');
+      if (!['image/png','image/jpeg','image/webp'].includes(file.type) || file.size > 716800) {
+        status.className = 'upload-status error'; status.textContent = 'Archivo inválido o mayor a 700 KB'; input.value = ''; return;
+      }
+      input.disabled = true; status.className = 'upload-status'; status.textContent = 'Subiendo imagen...';
+      try {
+        const response = await fetch('/admin/vending/${encodeURIComponent(id)}/image/' + slot, { method:'PUT', headers:{'Content-Type':file.type}, body:file });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || 'No se pudo guardar');
+        status.className = 'upload-status ok'; status.textContent = 'Imagen guardada; actualizando vista...';
+        location.reload();
+      } catch (error) {
+        input.disabled = false; status.className = 'upload-status error'; status.textContent = error.message;
+      }
+    }));
+  </script></main></body></html>`);
+});
+
+function mimeImagenVendingValido(buffer, mimeType) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return false;
+  if (mimeType === "image/png") return buffer.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]));
+  if (mimeType === "image/jpeg") return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (mimeType === "image/webp") return buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
+  return false;
+}
+
+app.put("/admin/vending/:deviceId/image/:slot", express.raw({
+  type: ["image/png", "image/jpeg", "image/webp"], limit: "700kb"
+}), async (req, res) => {
+  try {
+    const id = String(req.params.deviceId || "").trim().toUpperCase();
+    const slot = Number(req.params.slot);
+    const d = asegurarDevice(id);
+    if (d.tipo !== "vending" || !Number.isInteger(slot) || slot < 1 || slot > 36) {
+      return res.status(404).json({ ok: false, error: "Producto no encontrado" });
+    }
+    if (!databaseReady || !databasePool) return res.status(503).json({ ok: false, error: "La base persistente no está disponible" });
+    const mimeType = String(req.headers["content-type"] || "").split(";", 1)[0].toLowerCase();
+    if (!mimeImagenVendingValido(req.body, mimeType)) return res.status(415).json({ ok: false, error: "La imagen no coincide con PNG, JPG o WebP" });
+    await databasePool.query(
+      `INSERT INTO evetec_vending_images (device_id, slot, mime_type, image_data, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (device_id, slot) DO UPDATE SET mime_type = EXCLUDED.mime_type, image_data = EXCLUDED.image_data, updated_at = NOW()`,
+      [id, slot, mimeType, req.body]
+    );
+    d.configuracionVending.version = Number(d.configuracionVending.version || 0) + 1;
+    d.configuracionVending.productos[slot - 1].imagenUrl = `${PUBLIC_BASE_URL}/vending/image/${encodeURIComponent(id)}/${slot}?v=${d.configuracionVending.version}`;
+    guardarDatos();
+    res.json({ ok: true, slot, version: d.configuracionVending.version });
+  } catch (err) {
+    console.error("Error guardando imagen de expendedora:", err.message);
+    res.status(500).json({ ok: false, error: "No se pudo guardar la imagen" });
+  }
+});
+
+app.get("/vending/image/:deviceId/:slot", async (req, res) => {
+  try {
+    const id = String(req.params.deviceId || "").trim().toUpperCase();
+    const slot = Number(req.params.slot);
+    if (!databaseReady || !databasePool || !Number.isInteger(slot) || slot < 1 || slot > 36) return res.status(404).end();
+    const result = await databasePool.query(
+      "SELECT mime_type, image_data, updated_at FROM evetec_vending_images WHERE device_id = $1 AND slot = $2",
+      [id, slot]
+    );
+    const image = result.rows[0];
+    if (!image) return res.status(404).end();
+    res.set("Content-Type", image.mime_type);
+    res.set("Cache-Control", "public, max-age=31536000, immutable");
+    res.set("Last-Modified", new Date(image.updated_at).toUTCString());
+    res.send(image.image_data);
+  } catch (err) {
+    console.error("Error leyendo imagen de expendedora:", err.message);
+    res.status(500).end();
+  }
 });
 
 app.post("/admin/vending/:deviceId/update", (req, res) => {

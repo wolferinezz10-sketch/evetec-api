@@ -38,7 +38,8 @@ try {
   });
   const html = await admin.text();
   if (!admin.ok || (html.match(/<article class="product">/g) || []).length !== 36) throw new Error("Panel de productos inválido");
-  console.log("OK: expendedora aislada, protegida y con 36 productos");
+  if ((html.match(/data-upload-slot=/g) || []).length !== 36) throw new Error("Carga directa de imágenes incompleta");
+  console.log("OK: expendedora aislada, protegida, con 36 productos y carga de imágenes");
 } finally {
   child.kill("SIGTERM");
   await rm(dataFile, { force: true });
