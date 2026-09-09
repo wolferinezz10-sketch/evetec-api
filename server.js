@@ -3353,8 +3353,12 @@ app.get("/admin/vending", (req, res) => {
   const ownerInvitationUrl = ownerLinkPending && d.participantLinkRequest?.shareToken
     ? `${PUBLIC_BASE_URL}/vincular/${encodeURIComponent(id)}/p2/${encodeURIComponent(d.participantLinkRequest.shareToken)}`
     : "";
-  const ownerPercentage = Math.max(0, Math.min(100, Number(ownerParticipant.porcentaje || 0)));
-  const evetecPercentage = Math.max(0, Math.min(100, Number(d.participantes[0]?.porcentaje ?? (100 - ownerPercentage))));
+  const storedOwnerPercentage = Math.max(0, Math.min(100, Number(ownerParticipant.porcentaje || 0)));
+  const useDirectOwnerDefault = !ownerLinked && !ownerLinkPending && storedOwnerPercentage === 0;
+  const ownerPercentage = useDirectOwnerDefault ? 100 : storedOwnerPercentage;
+  const evetecPercentage = useDirectOwnerDefault
+    ? 0
+    : Math.max(0, Math.min(100, Number(d.participantes[0]?.porcentaje ?? (100 - ownerPercentage))));
   const productCards = cfg.productos.map((product, index) => `
     <article class="product">
       <div class="preview" style="--accent:${escaparHtml(product.color)}">${product.imagenUrl ? `<img src="${escaparHtml(product.imagenUrl)}" alt="">` : `<b>${escaparHtml(product.codigo)}</b>`}</div>
