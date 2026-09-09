@@ -2930,7 +2930,7 @@ function renderProductosVendingCliente(deviceId, cfg, csrf) {
       <label>Stock<input name="stock_${index}" type="number" min="0" step="1" value="${Number(product.stock)}"></label>
       <label>Nueva imagen<input type="file" accept="image/png,image/jpeg,image/webp" data-client-upload="${index + 1}"></label>
       <small data-client-upload-status="${index + 1}">Se recorta y optimiza automáticamente a 192 × 192</small>
-      <label class="client-check"><input name="enabled_${index}" type="checkbox" ${product.activo ? "checked" : ""}> Disponible</label>
+      <label class="client-check"><input name="enabled_${index}" type="checkbox" data-client-availability="${index + 1}" ${product.activo && Number(product.stock) > 0 ? "checked" : ""}> <span>${product.activo && Number(product.stock) > 0 ? "Disponible" : "Fuera de venta"}</span></label>
     </div></article>`).join("");
   return `<style>.client-products{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-height:72vh;overflow:auto;padding:3px}.client-product{display:grid;grid-template-columns:150px 1fr;gap:14px;padding:14px;border:1px solid var(--line);border-radius:16px;background:#071522}.client-preview{width:150px;height:150px;display:grid;place-items:center;overflow:hidden;border-radius:14px;background:var(--accent,#17324b);font-size:30px;font-weight:900}.client-preview img{width:100%;height:100%;object-fit:cover}.client-fields{display:grid;gap:9px}.client-row{display:grid;grid-template-columns:1fr 1fr;gap:9px}.client-check{display:flex;align-items:center;gap:8px}.client-check input{width:20px;height:20px}@media(max-width:1050px){.client-products{grid-template-columns:1fr}}@media(max-width:560px){.client-product{grid-template-columns:1fr}.client-preview{width:100%;height:auto;aspect-ratio:1}.client-row{grid-template-columns:1fr}}</style><h2>Productos, precios e imágenes</h2><p class="muted">Los cambios llegan automáticamente a la tableta. El código físico es de sólo lectura y únicamente puede cambiarlo EVETEC.</p>
     <form method="POST" action="/cliente/device/${encodeURIComponent(deviceId)}/update"><input type="hidden" name="csrf" value="${escaparHtml(csrf)}"><div class="client-products">${cards}</div><button>Guardar y actualizar tableta</button></form>
@@ -2953,6 +2953,11 @@ function renderProductosVendingCliente(deviceId, cfg, csrf) {
         status.textContent='Imagen optimizada y guardada';const preview=input.closest('.client-product').querySelector('.client-preview');
         preview.innerHTML='<img alt="Vista previa">';preview.querySelector('img').src=URL.createObjectURL(image);input.disabled=false;
       }catch(error){input.disabled=false;status.textContent=error.message}
+    }));
+    document.querySelectorAll('[data-client-availability]').forEach(input=>input.addEventListener('change',async()=>{
+      const stock=Number(input.closest('.client-product').querySelector('input[name^="stock_"]').value)||0;
+      if(input.checked&&stock<=0){input.checked=false;alert('Cargá un stock mayor a cero antes de habilitar el producto.');return}
+      input.disabled=true;try{const response=await fetch('/cliente/device/${encodeURIComponent(deviceId)}/vending-availability/'+input.dataset.clientAvailability,{method:'PUT',headers:{'Content-Type':'application/json','X-CSRF-Token':'${escaparHtml(csrf)}'},body:JSON.stringify({enabled:input.checked})});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo actualizar');input.parentElement.querySelector('span').textContent=input.checked?'Disponible':'Fuera de venta'}catch(error){input.checked=!input.checked;alert(error.message)}finally{input.disabled=false}
     }))</script>`;
 }
 
@@ -3008,6 +3013,21 @@ app.put("/cliente/device/:deviceId/vending-image/:slot", express.raw({
   }
 });
 
+app.put("/cliente/device/:deviceId/vending-availability/:slot", verificarCsrfCliente, (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const slot = Number(req.params.slot);
+  if (!req.clientAccount.deviceIds.includes(id) || !devices[id]) return res.status(403).json({ ok: false, error: "Equipo no autorizado" });
+  const d = asegurarDevice(id);
+  const product = d.tipo === "vending" && Number.isInteger(slot) ? d.configuracionVending.productos[slot - 1] : null;
+  if (!product) return res.status(404).json({ ok: false, error: "Producto no encontrado" });
+  const enabled = req.body.enabled === true;
+  if (enabled && Number(product.stock) <= 0) return res.status(409).json({ ok: false, error: "Agregá stock antes de habilitar este producto" });
+  product.activo = enabled;
+  d.configuracionVending.version = Number(d.configuracionVending.version || 0) + 1;
+  guardarDatos();
+  res.json({ ok: true, slot, enabled: product.activo, version: d.configuracionVending.version });
+});
+
 app.post("/cliente/device/:deviceId/update", verificarCsrfCliente, (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   if (!req.clientAccount.deviceIds.includes(id) || !devices[id]) return res.status(403).send("Equipo no autorizado.");
@@ -3020,7 +3040,7 @@ app.post("/cliente/device/:deviceId/update", verificarCsrfCliente, (req, res) =>
       const stock = Number(req.body[`stock_${index}`]);
       if (Number.isFinite(amount) && amount > 0) product.monto = Math.round(amount * 100) / 100;
       if (Number.isFinite(stock)) product.stock = Math.max(0, Math.floor(stock));
-      product.activo = req.body[`enabled_${index}`] === "on";
+      product.activo = product.stock > 0 && req.body[`enabled_${index}`] === "on";
       // Physical code and productId are intentionally never read from this form.
     });
     cfg.version = Number(cfg.version || 0) + 1;
@@ -3327,6 +3347,14 @@ app.get("/admin/vending", (req, res) => {
   const d = asegurarDevice(id);
   if (d.tipo !== "vending") return res.redirect(adminDeviceUrl(id));
   const cfg = d.configuracionVending;
+  const ownerParticipant = d.participantes.find(participant => participant.id === "p2") || {};
+  const ownerLinked = Boolean(ownerParticipant.linked && ownerParticipant.accessToken);
+  const ownerLinkPending = d.participantLinkRequest?.participantId === "p2";
+  const ownerInvitationUrl = ownerLinkPending && d.participantLinkRequest?.shareToken
+    ? `${PUBLIC_BASE_URL}/vincular/${encodeURIComponent(id)}/p2/${encodeURIComponent(d.participantLinkRequest.shareToken)}`
+    : "";
+  const ownerPercentage = Math.max(0, Math.min(100, Number(ownerParticipant.porcentaje || 0)));
+  const evetecPercentage = Math.max(0, Math.min(100, Number(d.participantes[0]?.porcentaje ?? (100 - ownerPercentage))));
   const productCards = cfg.productos.map((product, index) => `
     <article class="product">
       <div class="preview" style="--accent:${escaparHtml(product.color)}">${product.imagenUrl ? `<img src="${escaparHtml(product.imagenUrl)}" alt="">` : `<b>${escaparHtml(product.codigo)}</b>`}</div>
@@ -3337,13 +3365,35 @@ app.get("/admin/vending", (req, res) => {
         <label>Imagen desde archivo<input type="file" accept="image/png,image/jpeg,image/webp" data-upload-slot="${index + 1}"></label>
         <div class="upload-status" data-upload-status="${index + 1}">Redimensionado automático a 192 × 192</div>
         <label>O usar URL externa<input name="image_${index}" value="${escaparHtml(product.imagenUrl)}" maxlength="500" placeholder="https://..."></label>
-        <label class="check"><input name="enabled_${index}" type="checkbox" ${product.activo ? "checked" : ""}> Disponible</label>
+        <label class="check"><input name="enabled_${index}" type="checkbox" data-admin-availability="${index + 1}" ${product.activo && Number(product.stock) > 0 ? "checked" : ""}> <span>${product.activo && Number(product.stock) > 0 ? "Disponible" : "Fuera de venta"}</span></label>
       </div>
     </article>`).join("");
   res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EVETEC | Expendedora</title><style>
-    :root{color-scheme:dark;--bg:#06111f;--panel:#102033;--line:#294158;--text:#f5f8fc;--muted:#91a4b7;--blue:#28c7e2;--green:#43dc90}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#153854,transparent 35%),var(--bg);color:var(--text);font:15px Segoe UI,Arial,sans-serif}main{width:min(1240px,calc(100% - 28px));margin:auto;padding:28px 0 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:18px}.brand{letter-spacing:.2em;color:var(--blue);font-weight:900}h1{margin:5px 0}.muted{color:var(--muted)}nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0}.tab,.button{display:inline-flex;padding:11px 15px;border-radius:10px;border:1px solid var(--line);background:#142a40;color:var(--text);text-decoration:none;font-weight:800}.active,.button{background:var(--blue);color:#021319;border-color:transparent}.status{padding:9px 13px;border-radius:999px;background:${d.online ? "#123d2d" : "#42202a"};color:${d.online ? "#85f2b9" : "#ffb4bd"};font-weight:800}.toolbar{display:grid;grid-template-columns:1fr auto;gap:12px;background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:16px;margin-bottom:16px}input{width:100%;padding:10px;background:#071624;color:var(--text);border:1px solid var(--line);border-radius:9px;font:inherit}input[type=color],input[type=checkbox]{width:auto}.levels{display:grid;gap:12px}.level{display:grid;grid-template-columns:repeat(8,1fr);gap:10px}.level.featured{grid-template-columns:repeat(4,1fr)}.product{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden}.preview{height:105px;display:grid;place-items:center;background:linear-gradient(145deg,var(--accent),#071624);font-size:30px}.preview img{width:100%;height:100%;object-fit:contain}.fields{padding:11px;display:grid;gap:8px}.fields label{display:grid;gap:4px;color:var(--muted);font-size:11px}.row{display:grid;grid-template-columns:1fr 1.4fr;gap:7px}.check{display:flex!important;align-items:center;gap:7px}.upload-status{min-height:16px;color:var(--muted);font-size:10px}.upload-status.ok{color:var(--green)}.upload-status.error{color:#ff9da8}.save{position:sticky;bottom:12px;display:flex;justify-content:flex-end;margin-top:18px}.button{border:0;cursor:pointer;font-size:16px}@media(max-width:1050px){.level,.level.featured{grid-template-columns:repeat(4,1fr)}}@media(max-width:650px){.level,.level.featured{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}}
+    :root{color-scheme:dark;--bg:#06111f;--panel:#102033;--line:#294158;--text:#f5f8fc;--muted:#91a4b7;--blue:#28c7e2;--green:#43dc90;--danger:#ff6678}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#153854,transparent 35%),var(--bg);color:var(--text);font:15px Segoe UI,Arial,sans-serif}main{width:min(1240px,calc(100% - 28px));margin:auto;padding:28px 0 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:18px}.brand{letter-spacing:.2em;color:var(--blue);font-weight:900}h1{margin:5px 0}h2{margin:0 0 8px}.muted{color:var(--muted)}nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0}.tab,.button,.secondary,.danger{display:inline-flex;align-items:center;justify-content:center;padding:11px 15px;border-radius:10px;border:1px solid var(--line);background:#142a40;color:var(--text);text-decoration:none;font-weight:800;cursor:pointer}.active,.button{background:var(--blue);color:#021319;border-color:transparent}.danger{background:#481d29;color:#ffb8c1;border-color:#7c3040}.status,.pill{padding:9px 13px;border-radius:999px;background:${d.online ? "#123d2d" : "#42202a"};color:${d.online ? "#85f2b9" : "#ffb4bd"};font-weight:800}.pill{display:inline-flex;background:#172d42;color:var(--muted)}.pill.ok{background:#123d2d;color:#85f2b9}.pill.wait{background:#493b18;color:#ffe59a}.billing{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:16px;background:linear-gradient(135deg,#10263b,#0c1928);border:1px solid #31516c;padding:20px;border-radius:18px;margin-bottom:18px}.billing-fields{display:grid;grid-template-columns:1.2fr .55fr .55fr;gap:10px;margin:16px 0}.billing label{display:grid;gap:5px;color:var(--muted);font-size:12px}.billing-actions{display:flex;gap:9px;flex-wrap:wrap}.account-data{display:grid;grid-template-columns:auto 1fr;gap:8px 14px;margin:14px 0}.account-data span{color:var(--muted)}.qr-panel{display:grid;justify-items:center;align-content:center;gap:10px;min-height:240px;padding:15px;background:#071624;border:1px solid var(--line);border-radius:14px;text-align:center}.qr-panel canvas{width:190px;height:190px;background:white;border:10px solid white;border-radius:8px;image-rendering:pixelated}.qr-link{width:100%;font-size:11px}.toolbar{display:grid;grid-template-columns:1fr auto;gap:12px;background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:16px;margin-bottom:16px}input{width:100%;padding:10px;background:#071624;color:var(--text);border:1px solid var(--line);border-radius:9px;font:inherit}input[type=color],input[type=checkbox]{width:auto}.levels{display:grid;gap:12px}.level{display:grid;grid-template-columns:repeat(8,1fr);gap:10px}.level.featured{grid-template-columns:repeat(4,1fr)}.product{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden}.preview{height:105px;display:grid;place-items:center;background:linear-gradient(145deg,var(--accent),#071624);font-size:30px}.preview img{width:100%;height:100%;object-fit:contain}.fields{padding:11px;display:grid;gap:8px}.fields label{display:grid;gap:4px;color:var(--muted);font-size:11px}.row{display:grid;grid-template-columns:1fr 1.4fr;gap:7px}.check{display:flex!important;align-items:center;gap:7px}.upload-status{min-height:16px;color:var(--muted);font-size:10px}.upload-status.ok{color:var(--green)}.upload-status.error{color:#ff9da8}.save{position:sticky;bottom:12px;display:flex;justify-content:flex-end;margin-top:18px}.button{border:0;font-size:16px}@media(max-width:1050px){.level,.level.featured{grid-template-columns:repeat(4,1fr)}}@media(max-width:760px){.billing{grid-template-columns:1fr}.billing-fields{grid-template-columns:1fr 1fr}.billing-fields label:first-child{grid-column:1/-1}}@media(max-width:650px){.level,.level.featured{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}}
   </style></head><body><main><header><div><div class="brand">EVETEC</div><h1>${escaparHtml(cfg.nombre)}</h1><div class="muted">${escaparHtml(id)} · catálogo v${Number(cfg.version)}</div></div><span class="status">${d.online ? "Tableta online" : "Tableta offline"}</span></header>
-  <nav><a class="tab active" href="/admin/vending?device=${encodeURIComponent(id)}">Productos y precios</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}">Cobros y módulos</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}#client-account-form">Accesos de clientes</a><a class="tab" href="/logout">Salir</a></nav>
+  <nav><a class="tab active" href="/admin/vending?device=${encodeURIComponent(id)}">Productos y precios</a><a class="tab" href="#cuenta-cobro">Vincular cobro</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}">Cobros y módulos</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}#client-account-form">Accesos de clientes</a><a class="tab" href="/logout">Salir</a></nav>
+  <section class="billing" id="cuenta-cobro">
+    <div>
+      <span class="pill ${ownerLinked ? "ok" : (ownerLinkPending ? "wait" : "")}">${ownerLinked ? "Cuenta vinculada" : (ownerLinkPending ? "Vinculación pendiente" : "Sin cuenta vinculada")}</span>
+      <h2 style="margin-top:12px">Cuenta que recibirá los cobros</h2>
+      <p class="muted">El dueño autoriza su propia cuenta de Mercado Pago escaneando el QR o abriendo el enlace que le envíes. La credencial no se comparte ni se escribe manualmente.</p>
+      <div class="billing-fields">
+        <label>Alias del dueño<input id="owner-alias" value="${escaparHtml(ownerParticipant.nombre || d.participantLinkRequest?.alias || "Dueño")}" maxlength="40"></label>
+        <label>Dueño<input id="owner-percentage" type="number" min="0" max="100" step="0.01" value="${ownerPercentage}"></label>
+        <label>EVETEC<input id="evetec-percentage" type="number" min="0" max="100" step="0.01" value="${evetecPercentage}"></label>
+      </div>
+      <div class="account-data"><span>Usuario Mercado Pago</span><b>${escaparHtml(ownerParticipant.userId || "No asignado")}</b><span>Correo</span><b>${escaparHtml(ownerParticipant.email || "No informado")}</b></div>
+      <div class="billing-actions">
+        <button class="button" type="button" id="generate-owner-link">${ownerLinkPending ? "Reemplazar QR" : (ownerLinked ? "Cambiar cuenta" : "Generar QR de vinculación")}</button>
+        ${ownerLinkPending ? `<button class="secondary" type="button" id="share-owner-link">Enviar enlace</button><button class="danger" type="button" id="cancel-owner-link">Cancelar QR</button>` : ""}
+        ${ownerLinked ? `<button class="danger" type="button" id="unlink-owner">Desvincular cuenta</button>` : ""}
+      </div>
+      <p class="muted" style="font-size:12px">Los porcentajes deben sumar 100%. Al generar o reemplazar el QR también queda guardado este reparto.</p>
+    </div>
+    <div class="qr-panel">
+      ${ownerLinkPending ? `<canvas id="owner-link-qr" width="190" height="190" aria-label="QR de vinculación"></canvas><b>Escanear con el teléfono del dueño</b><input class="qr-link" id="owner-link-url" readonly value="${escaparHtml(ownerInvitationUrl)}">` : `<div style="font-size:52px">${ownerLinked ? "✓" : "⌁"}</div><b>${ownerLinked ? "Autorización guardada" : "Generá el QR cuando tengas al dueño presente"}</b><span class="muted">También podrás enviarle el enlace por WhatsApp o cualquier mensajería.</span>`}
+    </div>
+  </section>
   <form method="POST" action="/admin/vending/${encodeURIComponent(id)}/update"><section class="toolbar"><label>Nombre visible<input name="machineName" value="${escaparHtml(cfg.nombre)}" maxlength="60" required></label><div><b>Distribución de pantalla</b><div class="muted">Primera fila: 4 · siguientes: 8 + 8 + 8 + 8</div></div></section>
   <div class="levels"><section class="level featured">${productCards.split('</article>').slice(0,4).map(x=>x+'</article>').join('')}</section>${[4,12,20,28].map(start => `<section class="level">${productCards.split('</article>').slice(start,start+8).map(x=>x+'</article>').join('')}</section>`).join('')}</div>
   <div class="save"><button class="button" type="submit">Guardar y actualizar tableta</button></div></form>
@@ -3375,7 +3425,54 @@ app.get("/admin/vending", (req, res) => {
         input.disabled = false; status.className = 'upload-status error'; status.textContent = error.message;
       }
     }));
+    document.querySelectorAll('[data-admin-availability]').forEach(input => input.addEventListener('change', async () => {
+      const stock = Number(input.closest('.product').querySelector('input[name^="stock_"]').value) || 0;
+      if (input.checked && stock <= 0) { input.checked = false; alert('Cargá un stock mayor a cero antes de habilitar el producto.'); return; }
+      input.disabled = true;
+      try {
+        const response = await fetch('/admin/vending/${encodeURIComponent(id)}/availability/' + input.dataset.adminAvailability, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:input.checked}) });
+        const data = await response.json(); if (!response.ok || !data.ok) throw new Error(data.error || 'No se pudo actualizar');
+        input.parentElement.querySelector('span').textContent = input.checked ? 'Disponible' : 'Fuera de venta';
+      } catch (error) { input.checked = !input.checked; alert(error.message); } finally { input.disabled = false; }
+    }));
+    const ownerInput = document.getElementById('owner-percentage');
+    const evetecInput = document.getElementById('evetec-percentage');
+    function clampPercentage(value) { return Math.max(0, Math.min(100, Number(value) || 0)); }
+    ownerInput.addEventListener('input', () => { evetecInput.value = (100 - clampPercentage(ownerInput.value)).toFixed(2).replace(/\.00$/, ''); });
+    evetecInput.addEventListener('input', () => { ownerInput.value = (100 - clampPercentage(evetecInput.value)).toFixed(2).replace(/\.00$/, ''); });
+    document.getElementById('generate-owner-link').addEventListener('click', async event => {
+      const button = event.currentTarget, alias = document.getElementById('owner-alias').value.trim();
+      if (!alias) return alert('Escribí el nombre o alias del dueño.');
+      button.disabled = true; button.textContent = 'Generando...';
+      try {
+        const response = await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-request', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ participantId:'p2', alias, ownerPercentage:clampPercentage(ownerInput.value) }) });
+        const data = await response.json(); if (!response.ok || !data.ok) throw new Error(data.error || 'No se pudo generar el QR'); location.reload();
+      } catch (error) { button.disabled = false; button.textContent = 'Generar QR de vinculación'; alert(error.message); }
+    });
+    function drawQr(matrix, size) {
+      const canvas = document.getElementById('owner-link-qr'); if (!canvas) return;
+      const ctx = canvas.getContext('2d'), scale = canvas.width / size; ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.fillStyle = '#000';
+      for (let y=0;y<size;y++) for (let x=0;x<size;x++) if (matrix[y*size+x] === '1') ctx.fillRect(Math.floor(x*scale),Math.floor(y*scale),Math.ceil(scale),Math.ceil(scale));
+    }
+    ${ownerLinkPending ? `(async()=>{try{const response=await fetch('/oauth/participant-link/${encodeURIComponent(id)}/p2',{cache:'no-store'});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'QR no disponible');drawQr(data.qr_matrix,data.qr_size)}catch(error){document.querySelector('.qr-panel').insertAdjacentHTML('beforeend','<span style="color:#ff9da8">'+error.message+'</span>')}})();` : ""}
+    document.getElementById('share-owner-link')?.addEventListener('click', async event => { const url = document.getElementById('owner-link-url').value; try { if (navigator.share) return await navigator.share({title:'Vincular cobros EVETEC',text:'Abrí este enlace para vincular tu cuenta de Mercado Pago a la expendedora.',url}); await navigator.clipboard.writeText(url); event.currentTarget.textContent='Enlace copiado'; } catch(error) { if (error?.name !== 'AbortError') prompt('Copiá y enviá este enlace:',url); } });
+    document.getElementById('cancel-owner-link')?.addEventListener('click', async event => { if (!confirm('¿Cancelar este QR y su enlace?')) return; event.currentTarget.disabled=true; const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-link-cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:'p2'})}); const data=await response.json().catch(()=>({})); if(response.ok&&data.ok)location.reload();else{event.currentTarget.disabled=false;alert(data.error||'No se pudo cancelar');} });
+    document.getElementById('unlink-owner')?.addEventListener('click', async event => { const confirmation=prompt('La cuenta dejará de recibir nuevos cobros. Escribí DESVINCULAR para confirmar:'); if(String(confirmation||'').trim().toUpperCase()!=='DESVINCULAR')return; event.currentTarget.disabled=true; const response=await fetch('/admin/device/${encodeURIComponent(id)}/participant-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({participantId:'p2',confirmation:'DESVINCULAR'})}); const data=await response.json().catch(()=>({})); if(response.ok&&data.ok)location.reload();else{event.currentTarget.disabled=false;alert(data.error||'No se pudo desvincular');} });
   </script></main></body></html>`);
+});
+
+app.put("/admin/vending/:deviceId/availability/:slot", (req, res) => {
+  const id = String(req.params.deviceId || "").trim().toUpperCase();
+  const slot = Number(req.params.slot);
+  const d = asegurarDevice(id);
+  const product = d.tipo === "vending" && Number.isInteger(slot) ? d.configuracionVending.productos[slot - 1] : null;
+  if (!product) return res.status(404).json({ ok: false, error: "Producto no encontrado" });
+  const enabled = req.body.enabled === true;
+  if (enabled && Number(product.stock) <= 0) return res.status(409).json({ ok: false, error: "Agregá stock antes de habilitar este producto" });
+  product.activo = enabled;
+  d.configuracionVending.version = Number(d.configuracionVending.version || 0) + 1;
+  guardarDatos();
+  res.json({ ok: true, slot, enabled: product.activo, version: d.configuracionVending.version });
 });
 
 function mimeImagenVendingValido(buffer, mimeType) {
@@ -3451,7 +3548,7 @@ app.post("/admin/vending/:deviceId/update", (req, res) => {
     product.imagenUrl = String(req.body[`image_${index}`] || "").slice(0, 500);
     const color = String(req.body[`color_${index}`] || "").toUpperCase();
     if (/^#[0-9A-F]{6}$/.test(color)) product.color = color;
-    product.activo = req.body[`enabled_${index}`] === "on";
+    product.activo = product.stock > 0 && req.body[`enabled_${index}`] === "on";
   });
   d.configuracionVending.version = Number(d.configuracionVending.version || 0) + 1;
   guardarDatos();
@@ -4043,6 +4140,20 @@ app.post("/admin/device/:deviceId/participant-link-request", (req, res) => {
   invalidarOauthParticipante(id, participantId);
   participant.nombre = alias;
   d.cantidadParticipantes = Math.max(d.cantidadParticipantes, participantNumber);
+  const requestedOwnerPercentage = Number(req.body.ownerPercentage);
+  if (d.tipo === "vending" && participantId === "p2" && Number.isFinite(requestedOwnerPercentage)) {
+    const ownerPercentage = Math.max(0, Math.min(100, Math.round(requestedOwnerPercentage * 100) / 100));
+    const evetecPercentage = Math.round((100 - ownerPercentage) * 100) / 100;
+    d.participantes[0].nombre = "EVETEC";
+    d.participantes[0].porcentaje = evetecPercentage;
+    participant.porcentaje = ownerPercentage;
+    d.cantidadParticipantes = Math.max(2, d.cantidadParticipantes);
+    d.comisionEvetecPorcentaje = evetecPercentage;
+    d.pagadorComisionMp = "proportional";
+    d.modoCobro = evetecPercentage >= 99.999
+      ? "evetec"
+      : (evetecPercentage > 0 ? "owner_commission" : "owner_direct");
+  }
   d.participantLinkRequest = {
     participantId,
     alias,
@@ -4690,7 +4801,11 @@ app.post("/vending/delivered", requireVendingDevice, (req, res) => {
   local.vendDeliveredAt = new Date().toISOString();
   const d = asegurarDevice(deviceId);
   const product = d.configuracionVending.productos.find(item => item.productId === local.product_id);
-  if (product) product.stock = Math.max(0, Number(product.stock || 0) - 1);
+  if (product) {
+    product.stock = Math.max(0, Number(product.stock || 0) - 1);
+    if (product.stock <= 0) product.activo = false;
+    d.configuracionVending.version = Number(d.configuracionVending.version || 0) + 1;
+  }
   if (d.registroVentasHabilitado !== false) registrarPagoVerificado(local, local.payment_id);
   guardarDatos();
   res.json({ ok: true, state: "delivered" });

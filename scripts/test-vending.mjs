@@ -39,6 +39,19 @@ try {
   const html = await admin.text();
   if (!admin.ok || (html.match(/<article class="product">/g) || []).length !== 36) throw new Error("Panel de productos inválido");
   if ((html.match(/data-upload-slot=/g) || []).length !== 36) throw new Error("Carga directa de imágenes incompleta");
+  if (!html.includes("Generar QR de vinculación") || !html.includes("data-admin-availability=")) throw new Error("Vinculación o disponibilidad no expuestas");
+  const adminAuth = { Authorization: `Basic ${Buffer.from("Admin2:test-admin-password").toString("base64")}` };
+  const availability = await fetch(`http://127.0.0.1:${port}/admin/vending/EXPENDEDORA_001/availability/1`, {
+    method: "PUT", headers: { ...adminAuth, "Content-Type": "application/json" }, body: JSON.stringify({ enabled: false })
+  });
+  if (!availability.ok || !(await availability.json()).ok) throw new Error("No se pudo dar de baja el producto");
+  const afterDisable = await fetch(`http://127.0.0.1:${port}/vending/config/EXPENDEDORA_001`, { headers: { "x-device-key": "test-vending-device-key" } });
+  if ((await afterDisable.json()).productos[0].enabled !== false) throw new Error("La baja no llegó al catálogo del módulo");
+  const link = await fetch(`http://127.0.0.1:${port}/admin/device/EXPENDEDORA_001/participant-link-request`, {
+    method: "POST", headers: { ...adminAuth, "Content-Type": "application/json" }, body: JSON.stringify({ participantId: "p2", alias: "Dueño prueba", ownerPercentage: 85 })
+  });
+  const linked = await link.json();
+  if (!link.ok || !linked.ok || !linked.invitation_url?.includes("/vincular/EXPENDEDORA_001/p2/")) throw new Error("Enlace de vinculación inválido");
   console.log("OK: expendedora aislada, protegida, con 36 productos y carga de imágenes");
 } finally {
   child.kill("SIGTERM");
