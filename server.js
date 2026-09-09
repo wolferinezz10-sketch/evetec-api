@@ -347,7 +347,8 @@ function requireClient(req, res, next) {
 }
 
 function verificarCsrfCliente(req, res, next) {
-  if (comparacionSegura(req.body.csrf, req.clientCsrf)) return next();
+  const token = req.headers["x-csrf-token"] || (req.body && !Buffer.isBuffer(req.body) ? req.body.csrf : "");
+  if (comparacionSegura(token, req.clientCsrf)) return next();
   return res.status(403).send("La sesión cambió. Volvé al panel e intentá nuevamente.");
 }
 
@@ -2920,18 +2921,53 @@ app.post("/cliente/logout", verificarCsrfCliente, (req, res) => {
   res.redirect("/cliente/login");
 });
 
+function renderProductosVendingCliente(deviceId, cfg, csrf) {
+  const cards = cfg.productos.map((product, index) => `<article class="client-product">
+    <div class="client-preview" style="--accent:${escaparHtml(product.color)}">${product.imagenUrl ? `<img src="${escaparHtml(product.imagenUrl)}" alt="${escaparHtml(product.nombre)}">` : escaparHtml(product.codigo)}</div>
+    <div class="client-fields">
+      <label>Producto<input name="name_${index}" value="${escaparHtml(product.nombre)}" maxlength="40" required></label>
+      <div class="client-row"><label>Código físico<input value="${escaparHtml(product.codigo)}" disabled title="Sólo EVETEC puede modificar este código"></label><label>Precio ARS<input name="price_${index}" type="number" min="1" step="0.01" value="${Number(product.monto)}" required></label></div>
+      <label>Stock<input name="stock_${index}" type="number" min="0" step="1" value="${Number(product.stock)}"></label>
+      <label>Nueva imagen<input type="file" accept="image/png,image/jpeg,image/webp" data-client-upload="${index + 1}"></label>
+      <small data-client-upload-status="${index + 1}">Se recorta y optimiza automáticamente a 192 × 192</small>
+      <label class="client-check"><input name="enabled_${index}" type="checkbox" ${product.activo ? "checked" : ""}> Disponible</label>
+    </div></article>`).join("");
+  return `<style>.client-products{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-height:72vh;overflow:auto;padding:3px}.client-product{display:grid;grid-template-columns:150px 1fr;gap:14px;padding:14px;border:1px solid var(--line);border-radius:16px;background:#071522}.client-preview{width:150px;height:150px;display:grid;place-items:center;overflow:hidden;border-radius:14px;background:var(--accent,#17324b);font-size:30px;font-weight:900}.client-preview img{width:100%;height:100%;object-fit:cover}.client-fields{display:grid;gap:9px}.client-row{display:grid;grid-template-columns:1fr 1fr;gap:9px}.client-check{display:flex;align-items:center;gap:8px}.client-check input{width:20px;height:20px}@media(max-width:1050px){.client-products{grid-template-columns:1fr}}@media(max-width:560px){.client-product{grid-template-columns:1fr}.client-preview{width:100%;height:auto;aspect-ratio:1}.client-row{grid-template-columns:1fr}}</style><h2>Productos, precios e imágenes</h2><p class="muted">Los cambios llegan automáticamente a la tableta. El código físico es de sólo lectura y únicamente puede cambiarlo EVETEC.</p>
+    <form method="POST" action="/cliente/device/${encodeURIComponent(deviceId)}/update"><input type="hidden" name="csrf" value="${escaparHtml(csrf)}"><div class="client-products">${cards}</div><button>Guardar y actualizar tableta</button></form>
+    <script>
+    async function imagenCuadrada(file){
+      if(!file.type.startsWith('image/')||file.size>10*1024*1024)throw new Error('Elegí una imagen PNG, JPG o WebP menor a 10 MB');
+      const bitmap=await createImageBitmap(file),size=192,canvas=document.createElement('canvas');
+      canvas.width=size;canvas.height=size;const ctx=canvas.getContext('2d');
+      ctx.fillStyle='#fff';ctx.fillRect(0,0,size,size);
+      const scale=Math.max(size/bitmap.width,size/bitmap.height),w=bitmap.width*scale,h=bitmap.height*scale;
+      ctx.drawImage(bitmap,(size-w)/2,(size-h)/2,w,h);bitmap.close();
+      return await new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('No se pudo procesar la imagen')),'image/png'));
+    }
+    document.querySelectorAll('[data-client-upload]').forEach(input=>input.addEventListener('change',async()=>{
+      const file=input.files&&input.files[0];if(!file)return;const slot=input.dataset.clientUpload;
+      const status=document.querySelector('[data-client-upload-status="'+slot+'"]');input.disabled=true;status.textContent='Optimizando imagen...';
+      try{const image=await imagenCuadrada(file);status.textContent='Subiendo '+Math.ceil(image.size/1024)+' KB...';
+        const response=await fetch('/cliente/device/${encodeURIComponent(deviceId)}/vending-image/'+slot,{method:'PUT',headers:{'Content-Type':'image/png','X-CSRF-Token':'${escaparHtml(csrf)}'},body:image});
+        const data=await response.json().catch(()=>({}));if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo guardar');
+        status.textContent='Imagen optimizada y guardada';const preview=input.closest('.client-product').querySelector('.client-preview');
+        preview.innerHTML='<img alt="Vista previa">';preview.querySelector('img').src=URL.createObjectURL(image);input.disabled=false;
+      }catch(error){input.disabled=false;status.textContent=error.message}
+    }))</script>`;
+}
+
 app.get("/cliente", (req, res) => {
   const allowedIds = req.clientAccount.deviceIds.filter(id => devices[id]);
   if (!allowedIds.length) return res.status(403).send("Esta cuenta todavía no tiene equipos asignados. Contactá a EVETEC.");
   const requested = String(req.query.device || "").trim().toUpperCase();
   const id = allowedIds.includes(requested) ? requested : allowedIds[0];
   const d = asegurarDevice(id);
-  const cfg = d.tipo === "gachapon" ? configuracionGachaponDevice(id) : configuracionServicioDevice(id);
+  const cfg = d.tipo === "vending" ? d.configuracionVending : d.tipo === "gachapon" ? configuracionGachaponDevice(id) : configuracionServicioDevice(id);
   const live = payloadEstadisticasCliente(id);
   const events = eventosUsoDevice(id).slice(-30).reverse();
   const tabs = allowedIds.map(deviceId => `<a class="tab ${deviceId === id ? "active" : ""}" href="/cliente?device=${encodeURIComponent(deviceId)}"><i class="${devices[deviceId].online ? "on" : ""}"></i><span>${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`).join("");
   const participantCards = live.participants.map(p => `<div class="card stat"><span>${escaparHtml(p.nombre)} · ${p.porcentaje.toLocaleString("es-AR", {maximumFractionDigits:2})}%</span><b data-participant="${escaparHtml(p.id)}">$${formatoDinero(p.total)}</b><small>neto acumulado, comisión MP proporcional</small></div>`).join("");
-  const configForm = d.tipo === "gachapon" ? `<h2>Precios y tiempo</h2><p class="muted">El modo de funcionamiento y la cantidad de opciones los administra EVETEC.</p><form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><div class="grid"><label>Segundos por jugada<input name="segundosPorJugada" type="number" min="1" max="600" step="1" value="${Number(cfg.segundos_por_jugada || 30)}" required></label>${cfg.planes.slice(0, Number(cfg.cantidad_opciones || 3)).map((plan,index)=>`<label>Precio · ${index+1} jugada${index ? "s" : ""}<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(plan.monto)}" required></label>`).join("")}</div><button>Guardar precios y tiempo</button></form>` : `<h2>Precio y duración</h2><form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><div class="grid"><label>Precio (ARS)<input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></label><label>Minutos<input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos)/60)}" required></label><label>Segundos<input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos)%60}" required></label></div><button>Guardar precio y duración</button></form>`;
+  const configForm = d.tipo === "vending" ? renderProductosVendingCliente(id, cfg, req.clientCsrf) : d.tipo === "gachapon" ? `<h2>Precios y tiempo</h2><p class="muted">El modo de funcionamiento y la cantidad de opciones los administra EVETEC.</p><form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><div class="grid"><label>Segundos por jugada<input name="segundosPorJugada" type="number" min="1" max="600" step="1" value="${Number(cfg.segundos_por_jugada || 30)}" required></label>${cfg.planes.slice(0, Number(cfg.cantidad_opciones || 3)).map((plan,index)=>`<label>Precio · ${index+1} jugada${index ? "s" : ""}<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(plan.monto)}" required></label>`).join("")}</div><button>Guardar precios y tiempo</button></form>` : `<h2>Precio y duración</h2><form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><div class="grid"><label>Precio (ARS)<input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></label><label>Minutos<input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos)/60)}" required></label><label>Segundos<input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos)%60}" required></label></div><button>Guardar precio y duración</button></form>`;
   const rows = events.map(e => `<tr><td>${e.approved_epoch ? new Date(Number(e.approved_epoch)*1000).toLocaleString("es-AR") : "-"}</td><td>$${formatoDinero(Number(e.amount_cents||0)/100)}</td><td>$${formatoDinero(Number(e.mp_fee_cents||0)/100)}</td><td>${formatoTiempo(e.sold_seconds)}</td><td>${formatoTiempo(e.actual_seconds)}</td><td>${e.completed === false ? "Interrumpido" : "Completado"}</td></tr>`).join("");
   res.set("Cache-Control", "no-store");
   res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escaparHtml(cfg.nombre)} · EVETEC</title><style>:root{--bg:#06111e;--panel:#0d1d2c;--line:#29445c;--cyan:#35d5e4;--muted:#9bb1c4;--green:#31d17c;--yellow:#ffc84b}*{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#071522,#04101b);color:#edf8ff;font-family:system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1220px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin:18px 0}.brand{color:var(--cyan);font-size:12px;font-weight:900;letter-spacing:.16em}h1{margin:4px 0;font-size:clamp(26px,4vw,42px)}h2{margin-top:0}.muted,small{color:var(--muted)}.status{padding:10px 14px;border:1px solid var(--line);border-radius:999px;font-weight:800}.status i,.tab i{display:inline-block;width:9px;height:9px;border-radius:50%;background:#e95064;margin-right:7px}.status i.on,.tab i.on{background:var(--green);box-shadow:0 0 10px var(--green)}.tabs{display:flex;gap:9px;overflow:auto}.tab{min-width:190px;padding:12px;border:1px solid var(--line);border-radius:13px;color:white;text-decoration:none;display:grid;grid-template-columns:14px 1fr}.tab small{grid-column:2}.tab.active{border-color:var(--cyan);background:#113047}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin:18px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:20px}.stat span{display:block;color:#a9c2d6;text-transform:uppercase;font-size:11px;font-weight:850;letter-spacing:.07em}.stat b{font-size:28px;display:block;margin:8px 0}.columns{display:grid;grid-template-columns:1.2fr .8fr;gap:14px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}label{display:grid;gap:7px;color:#a9c2d6;font-size:12px;text-transform:uppercase;font-weight:800}input{padding:12px;border-radius:10px;border:1px solid #35516a;background:#071522;color:white;font-size:17px}button{border:0;border-radius:10px;padding:12px 16px;background:var(--cyan);color:#03202a;font-weight:900;cursor:pointer;margin-top:14px}.readonly{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line);padding:10px 0}.table{overflow:auto;margin-top:14px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted);font-size:11px;text-transform:uppercase}.logout{background:transparent;color:#bcd0df;border:1px solid var(--line);margin:0}@media(max-width:850px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}}@media(max-width:560px){main{padding:14px}.top{align-items:flex-start}.grid{grid-template-columns:1fr}.stats{gap:8px}.card{padding:15px}}</style></head><body><main><div class="tabs">${tabs}</div><header class="top"><div><div class="brand">EVETEC · PORTAL DEL CLIENTE</div><h1>${escaparHtml(cfg.nombre)}</h1><div class="muted">${escaparHtml(req.clientAccount.displayName)} · ${escaparHtml(id)}</div></div><form method="POST" action="/cliente/logout"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><button class="logout">Salir</button></form></header><div class="status"><i id="online-dot" class="${live.online ? "on" : ""}"></i><span id="online-label">${live.online ? "Equipo online" : "Equipo offline"}</span></div><section class="stats"><div class="card stat"><span>Recaudado</span><b id="total">$${formatoDinero(live.totalRecaudado)}</b></div><div class="card stat"><span>Pagos aprobados</span><b id="payments">${live.pagosAprobados}</b></div><div class="card stat"><span>Tiempo vendido</span><b id="sold">${formatoTiempo(live.segundosVendidos)}</b></div><div class="card stat"><span>Uso real</span><b id="used">${formatoTiempo(live.tiempoMotor)}</b></div>${participantCards}<div class="card stat"><span>Comisión MP real</span><b id="fees">$${formatoDinero(live.comisionesMp)}</b></div><div class="card stat"><span>Tasa efectiva MP</span><b id="rate">${live.tasaMpEfectiva.toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2})}%</b></div><div class="card stat"><span>Neto tras MP</span><b id="net">$${formatoDinero(live.netoDespuesMp)}</b></div></section><section class="columns"><div class="card">${configForm}</div><aside class="card"><h2>Estado del equipo</h2><div class="readonly"><span>Última conexión</span><b id="last-seen">${live.ultimaConexion ? new Date(live.ultimaConexion).toLocaleString("es-AR") : "Nunca"}</b></div><div class="readonly"><span>Firmware</span><b>${escaparHtml(live.firmware)}</b></div><div class="readonly"><span>WiFi / señal</span><b>${escaparHtml(live.ssid)} ${live.rssi ? `(${live.rssi} dBm)` : ""}</b></div><div class="readonly"><span>Reparto</span><b>Solo lectura</b></div><p class="muted">Los porcentajes, vinculaciones y la cuenta receptora son administrados por EVETEC. Las cifras reflejan los pagos confirmados y sincronizados.</p></aside></section><section class="card" style="margin-top:14px"><h2>Servicios confirmados</h2><div class="table"><table><thead><tr><th>Fecha</th><th>Monto</th><th>Comisión MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${rows || `<tr><td colspan="6">Todavía no hay servicios registrados.</td></tr>`}</tbody></table></div></section><script>const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{maximumFractionDigits:2});const time=n=>{n=Number(n||0);const h=Math.floor(n/3600),m=Math.floor(n%3600/60),s=n%60;return h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'};async function refresh(){try{const r=await fetch('/cliente/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const x=await r.json();document.getElementById('online-dot').classList.toggle('on',x.online);document.getElementById('online-label').textContent=x.online?'Equipo online':'Equipo offline';document.getElementById('total').textContent=money(x.totalRecaudado);document.getElementById('payments').textContent=x.pagosAprobados;document.getElementById('sold').textContent=time(x.segundosVendidos);document.getElementById('used').textContent=time(x.tiempoMotor);document.getElementById('fees').textContent=money(x.comisionesMp);document.getElementById('net').textContent=money(x.netoDespuesMp);document.getElementById('rate').textContent=Number(x.tasaMpEfectiva).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';document.getElementById('last-seen').textContent=x.ultimaConexion?new Date(x.ultimaConexion).toLocaleString('es-AR'):'Nunca';document.querySelectorAll('[data-participant]').forEach(el=>el.textContent=money(x.participantTotals[el.dataset.participant]||0))}catch(_){}}setInterval(refresh,5000)</script></main></body></html>`);
@@ -2944,11 +2980,51 @@ app.get("/cliente/device/:deviceId/live-stats", (req, res) => {
   res.json(payloadEstadisticasCliente(id));
 });
 
+app.put("/cliente/device/:deviceId/vending-image/:slot", express.raw({
+  type: ["image/png", "image/jpeg", "image/webp"], limit: "700kb"
+}), verificarCsrfCliente, async (req, res) => {
+  try {
+    const id = String(req.params.deviceId || "").trim().toUpperCase();
+    const slot = Number(req.params.slot);
+    if (!req.clientAccount.deviceIds.includes(id) || !devices[id]) return res.status(403).json({ ok: false, error: "Equipo no autorizado" });
+    const d = asegurarDevice(id);
+    if (d.tipo !== "vending" || !Number.isInteger(slot) || slot < 1 || slot > 36) return res.status(404).json({ ok: false, error: "Producto no encontrado" });
+    if (!databaseReady || !databasePool) return res.status(503).json({ ok: false, error: "La base persistente no está disponible" });
+    const mimeType = String(req.headers["content-type"] || "").split(";", 1)[0].toLowerCase();
+    if (!mimeImagenVendingValido(req.body, mimeType)) return res.status(415).json({ ok: false, error: "Imagen inválida" });
+    await databasePool.query(
+      `INSERT INTO evetec_vending_images (device_id, slot, mime_type, image_data, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (device_id, slot) DO UPDATE SET mime_type = EXCLUDED.mime_type, image_data = EXCLUDED.image_data, updated_at = NOW()`,
+      [id, slot, mimeType, req.body]
+    );
+    d.configuracionVending.version = Number(d.configuracionVending.version || 0) + 1;
+    d.configuracionVending.productos[slot - 1].imagenUrl = `${PUBLIC_BASE_URL}/vending/image/${encodeURIComponent(id)}/${slot}?v=${d.configuracionVending.version}`;
+    guardarDatos();
+    res.json({ ok: true, slot, version: d.configuracionVending.version });
+  } catch (err) {
+    console.error("Error guardando imagen desde portal cliente:", err.message);
+    res.status(500).json({ ok: false, error: "No se pudo guardar la imagen" });
+  }
+});
+
 app.post("/cliente/device/:deviceId/update", verificarCsrfCliente, (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   if (!req.clientAccount.deviceIds.includes(id) || !devices[id]) return res.status(403).send("Equipo no autorizado.");
   const d = asegurarDevice(id);
-  if (d.tipo === "gachapon") {
+  if (d.tipo === "vending") {
+    const cfg = d.configuracionVending;
+    cfg.productos.forEach((product, index) => {
+      product.nombre = String(req.body[`name_${index}`] || product.nombre).trim().slice(0, 40) || product.nombre;
+      const amount = Number(req.body[`price_${index}`]);
+      const stock = Number(req.body[`stock_${index}`]);
+      if (Number.isFinite(amount) && amount > 0) product.monto = Math.round(amount * 100) / 100;
+      if (Number.isFinite(stock)) product.stock = Math.max(0, Math.floor(stock));
+      product.activo = req.body[`enabled_${index}`] === "on";
+      // Physical code and productId are intentionally never read from this form.
+    });
+    cfg.version = Number(cfg.version || 0) + 1;
+  } else if (d.tipo === "gachapon") {
     const cfg = configuracionGachaponDevice(id);
     const seconds = Number(req.body.segundosPorJugada);
     if (Number.isFinite(seconds)) cfg.segundos_por_jugada = Math.max(1, Math.min(600, Math.round(seconds)));
@@ -3259,7 +3335,7 @@ app.get("/admin/vending", (req, res) => {
         <div class="row"><label>Código<input name="code_${index}" value="${escaparHtml(product.codigo)}" pattern="[1-9]{2}" maxlength="2" required></label><label>Precio ARS<input name="price_${index}" type="number" min="1" step="0.01" value="${Number(product.monto)}" required></label></div>
         <div class="row"><label>Stock<input name="stock_${index}" type="number" min="0" step="1" value="${Number(product.stock)}"></label><label>Color<input name="color_${index}" type="color" value="${escaparHtml(product.color)}"></label></div>
         <label>Imagen desde archivo<input type="file" accept="image/png,image/jpeg,image/webp" data-upload-slot="${index + 1}"></label>
-        <div class="upload-status" data-upload-status="${index + 1}">PNG, JPG o WebP · máximo 700 KB</div>
+        <div class="upload-status" data-upload-status="${index + 1}">Redimensionado automático a 192 × 192</div>
         <label>O usar URL externa<input name="image_${index}" value="${escaparHtml(product.imagenUrl)}" maxlength="500" placeholder="https://..."></label>
         <label class="check"><input name="enabled_${index}" type="checkbox" ${product.activo ? "checked" : ""}> Disponible</label>
       </div>
@@ -3272,17 +3348,25 @@ app.get("/admin/vending", (req, res) => {
   <div class="levels"><section class="level featured">${productCards.split('</article>').slice(0,4).map(x=>x+'</article>').join('')}</section>${[4,12,20,28].map(start => `<section class="level">${productCards.split('</article>').slice(start,start+8).map(x=>x+'</article>').join('')}</section>`).join('')}</div>
   <div class="save"><button class="button" type="submit">Guardar y actualizar tableta</button></div></form>
   <script>
+    async function imagenVendingCuadrada(file) {
+      if (!file.type.startsWith('image/') || file.size > 10 * 1024 * 1024) throw new Error('Elegí una imagen menor a 10 MB');
+      const bitmap = await createImageBitmap(file), size = 192, canvas = document.createElement('canvas');
+      canvas.width = size; canvas.height = size; const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
+      const scale = Math.max(size / bitmap.width, size / bitmap.height), width = bitmap.width * scale, height = bitmap.height * scale;
+      ctx.drawImage(bitmap, (size - width) / 2, (size - height) / 2, width, height); bitmap.close();
+      return await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('No se pudo procesar la imagen')), 'image/png'));
+    }
     document.querySelectorAll('[data-upload-slot]').forEach(input => input.addEventListener('change', async () => {
       const file = input.files && input.files[0];
       if (!file) return;
       const slot = input.dataset.uploadSlot;
       const status = document.querySelector('[data-upload-status="' + slot + '"]');
-      if (!['image/png','image/jpeg','image/webp'].includes(file.type) || file.size > 716800) {
-        status.className = 'upload-status error'; status.textContent = 'Archivo inválido o mayor a 700 KB'; input.value = ''; return;
-      }
-      input.disabled = true; status.className = 'upload-status'; status.textContent = 'Subiendo imagen...';
+      input.disabled = true; status.className = 'upload-status'; status.textContent = 'Optimizando imagen...';
       try {
-        const response = await fetch('/admin/vending/${encodeURIComponent(id)}/image/' + slot, { method:'PUT', headers:{'Content-Type':file.type}, body:file });
+        const image = await imagenVendingCuadrada(file);
+        status.textContent = 'Subiendo ' + Math.ceil(image.size / 1024) + ' KB...';
+        const response = await fetch('/admin/vending/${encodeURIComponent(id)}/image/' + slot, { method:'PUT', headers:{'Content-Type':'image/png'}, body:image });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || !data.ok) throw new Error(data.error || 'No se pudo guardar');
         status.className = 'upload-status ok'; status.textContent = 'Imagen guardada; actualizando vista...';
