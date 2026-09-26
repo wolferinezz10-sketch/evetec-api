@@ -2921,6 +2921,58 @@ app.post("/cliente/logout", verificarCsrfCliente, (req, res) => {
   res.redirect("/cliente/login");
 });
 
+function editorImagenVendingHtml() {
+  return `<style>
+    .vending-crop[hidden]{display:none}.vending-crop{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;padding:18px;background:rgba(2,8,23,.86);backdrop-filter:blur(9px)}
+    .vending-crop-card{width:min(470px,100%);padding:20px;border:1px solid #31516c;border-radius:24px;background:linear-gradient(155deg,#12283d,#081522);box-shadow:0 28px 90px rgba(0,0,0,.55);color:#f5f8fc}
+    .vending-crop-card h3{margin:0 0 6px;font-size:23px}.vending-crop-card p{margin:0 0 14px;color:#a9bac9;line-height:1.4}
+    .vending-crop-stage{position:relative;width:min(360px,100%);margin:auto;aspect-ratio:1;overflow:hidden;border:3px solid #28c7e2;border-radius:18px;background:#fff;box-shadow:0 0 0 6px rgba(40,199,226,.12)}
+    .vending-crop-stage canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}.vending-crop-stage canvas:active{cursor:grabbing}
+    .vending-crop-grid{pointer-events:none;position:absolute;inset:0;background:linear-gradient(90deg,transparent 33.1%,rgba(255,255,255,.45) 33.3%,transparent 33.6%,transparent 66.3%,rgba(255,255,255,.45) 66.6%,transparent 66.9%),linear-gradient(0deg,transparent 33.1%,rgba(255,255,255,.45) 33.3%,transparent 33.6%,transparent 66.3%,rgba(255,255,255,.45) 66.6%,transparent 66.9%)}
+    .vending-crop-zoom{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:12px;margin:18px 0 14px;color:#a9bac9}.vending-crop-zoom input{accent-color:#28c7e2}
+    .vending-crop-actions{display:grid;grid-template-columns:1fr 1.35fr;gap:10px}.vending-crop-actions button{min-height:48px;margin:0;border:0;border-radius:13px;font:700 15px Segoe UI,Arial,sans-serif;cursor:pointer}
+    .vending-crop-cancel{background:#20354a;color:#dce8f3}.vending-crop-use{background:#28c7e2;color:#021319}.vending-crop-tip{text-align:center;font-size:12px;color:#86a0b5;margin-top:10px}
+  </style>
+  <div class="vending-crop" id="vending-crop" hidden role="dialog" aria-modal="true" aria-labelledby="vending-crop-title">
+    <section class="vending-crop-card"><h3 id="vending-crop-title">Ubicá el producto</h3><p>Arrastrá la fotografía y ajustá el zoom hasta dejar el encuadre como querés que aparezca en la máquina.</p>
+      <div class="vending-crop-stage"><canvas id="vending-crop-canvas" width="360" height="360"></canvas><div class="vending-crop-grid"></div></div>
+      <label class="vending-crop-zoom"><span>Zoom</span><input id="vending-crop-zoom" type="range" min="100" max="300" value="100" step="1"></label>
+      <div class="vending-crop-actions"><button type="button" class="vending-crop-cancel" id="vending-crop-cancel">Cancelar</button><button type="button" class="vending-crop-use" id="vending-crop-use">Usar esta posición</button></div>
+      <div class="vending-crop-tip">La imagen final se optimiza a 192 × 192 para cargar rápido.</div>
+    </section>
+  </div>
+  <script>
+    window.editarImagenVending = async function(file) {
+      if (!file || !file.type.startsWith('image/') || file.size > 10 * 1024 * 1024) throw new Error('Elegí una imagen PNG, JPG o WebP menor a 10 MB');
+      const bitmap = await createImageBitmap(file);
+      const modal = document.getElementById('vending-crop'), canvas = document.getElementById('vending-crop-canvas');
+      const zoomControl = document.getElementById('vending-crop-zoom'), cancelButton = document.getElementById('vending-crop-cancel'), useButton = document.getElementById('vending-crop-use');
+      const ctx = canvas.getContext('2d'); let zoom = 1, offsetX = 0, offsetY = 0, dragging = false, pointerX = 0, pointerY = 0, settled = false;
+      const baseScale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
+      function geometry() {
+        const scale = baseScale * zoom, width = bitmap.width * scale, height = bitmap.height * scale;
+        const maxX = Math.max(0, (width - canvas.width) / 2), maxY = Math.max(0, (height - canvas.height) / 2);
+        offsetX = Math.max(-maxX, Math.min(maxX, offsetX)); offsetY = Math.max(-maxY, Math.min(maxY, offsetY));
+        return { width, height, x:(canvas.width-width)/2+offsetX, y:(canvas.height-height)/2+offsetY };
+      }
+      function draw() { const g=geometry(); ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';ctx.drawImage(bitmap,g.x,g.y,g.width,g.height); }
+      function movementScale() { const rect=canvas.getBoundingClientRect(); return rect.width ? canvas.width/rect.width : 1; }
+      canvas.onpointerdown = event => { dragging=true;pointerX=event.clientX;pointerY=event.clientY;canvas.setPointerCapture(event.pointerId); };
+      canvas.onpointermove = event => { if(!dragging)return;const factor=movementScale();offsetX+=(event.clientX-pointerX)*factor;offsetY+=(event.clientY-pointerY)*factor;pointerX=event.clientX;pointerY=event.clientY;draw(); };
+      canvas.onpointerup = canvas.onpointercancel = () => { dragging=false; };
+      canvas.onwheel = event => { event.preventDefault();zoom=Math.max(1,Math.min(3,zoom+(event.deltaY<0?.08:-.08)));zoomControl.value=String(Math.round(zoom*100));draw(); };
+      zoomControl.value='100';zoomControl.oninput=()=>{zoom=Number(zoomControl.value)/100;draw();};
+      modal.hidden=false; document.body.style.overflow='hidden'; draw();
+      return await new Promise(resolve => {
+        function cleanup(value) { if(settled)return;settled=true;modal.hidden=true;document.body.style.overflow='';canvas.onpointerdown=canvas.onpointermove=canvas.onpointerup=canvas.onpointercancel=canvas.onwheel=null;document.removeEventListener('keydown',onKey);bitmap.close();resolve(value); }
+        function onKey(event){if(event.key==='Escape')cleanup(null)}
+        cancelButton.onclick=()=>cleanup(null);modal.onclick=event=>{if(event.target===modal)cleanup(null)};document.addEventListener('keydown',onKey);
+        useButton.onclick=()=>{const g=geometry(),size=192,out=document.createElement('canvas');out.width=size;out.height=size;const outCtx=out.getContext('2d'),ratio=size/canvas.width;outCtx.fillStyle='#fff';outCtx.fillRect(0,0,size,size);outCtx.imageSmoothingEnabled=true;outCtx.imageSmoothingQuality='high';outCtx.drawImage(bitmap,g.x*ratio,g.y*ratio,g.width*ratio,g.height*ratio);out.toBlob(blob=>{if(blob)cleanup(blob);else cleanup(null)},'image/png');};
+      });
+    };
+  </script>`;
+}
+
 function renderProductosVendingCliente(deviceId, cfg, csrf) {
   const cards = cfg.productos.map((product, index) => `<article class="client-product">
     <div class="client-preview" style="--accent:${escaparHtml(product.color)}">${product.imagenUrl ? `<img src="${escaparHtml(product.imagenUrl)}" alt="${escaparHtml(product.nombre)}">` : escaparHtml(product.codigo)}</div>
@@ -2929,30 +2981,21 @@ function renderProductosVendingCliente(deviceId, cfg, csrf) {
       <div class="client-row"><label>Código físico<input value="${escaparHtml(product.codigo)}" disabled title="Sólo EVETEC puede modificar este código"></label><label>Precio ARS<input name="price_${index}" type="number" min="1" step="0.01" value="${Number(product.monto)}" required></label></div>
       <label>Stock<input name="stock_${index}" type="number" min="0" step="1" value="${Number(product.stock)}"></label>
       <label>Nueva imagen<input type="file" accept="image/png,image/jpeg,image/webp" data-client-upload="${index + 1}"></label>
-      <small data-client-upload-status="${index + 1}">Se recorta y optimiza automáticamente a 192 × 192</small>
+      <small data-client-upload-status="${index + 1}">Al elegirla podrás encuadrarla y ajustar el zoom</small>
       <label class="client-check"><input name="enabled_${index}" type="checkbox" data-client-availability="${index + 1}" ${product.activo && Number(product.stock) > 0 ? "checked" : ""}> <span>${product.activo && Number(product.stock) > 0 ? "Disponible" : "Fuera de venta"}</span></label>
     </div></article>`).join("");
-  return `<style>.client-products{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-height:72vh;overflow:auto;padding:3px}.client-product{display:grid;grid-template-columns:150px 1fr;gap:14px;padding:14px;border:1px solid var(--line);border-radius:16px;background:#071522}.client-preview{width:150px;height:150px;display:grid;place-items:center;overflow:hidden;border-radius:14px;background:var(--accent,#17324b);font-size:30px;font-weight:900}.client-preview img{width:100%;height:100%;object-fit:cover}.client-fields{display:grid;gap:9px}.client-row{display:grid;grid-template-columns:1fr 1fr;gap:9px}.client-check{display:flex;align-items:center;gap:8px}.client-check input{width:20px;height:20px}@media(max-width:1050px){.client-products{grid-template-columns:1fr}}@media(max-width:560px){.client-product{grid-template-columns:1fr}.client-preview{width:100%;height:auto;aspect-ratio:1}.client-row{grid-template-columns:1fr}}</style><h2>Productos, precios e imágenes</h2><p class="muted">Los cambios llegan automáticamente a la tableta. El código físico es de sólo lectura y únicamente puede cambiarlo EVETEC.</p>
+  return `${editorImagenVendingHtml()}<style>.client-products{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-height:72vh;overflow:auto;padding:3px}.client-product{display:grid;grid-template-columns:150px 1fr;gap:14px;padding:14px;border:1px solid var(--line);border-radius:16px;background:#071522}.client-preview{width:150px;height:150px;display:grid;place-items:center;overflow:hidden;border-radius:14px;background:var(--accent,#17324b);font-size:30px;font-weight:900}.client-preview img{width:100%;height:100%;object-fit:cover}.client-fields{display:grid;gap:9px}.client-row{display:grid;grid-template-columns:1fr 1fr;gap:9px}.client-check{display:flex;align-items:center;gap:8px}.client-check input{width:20px;height:20px}@media(max-width:1050px){.client-products{grid-template-columns:1fr}}@media(max-width:560px){.client-product{grid-template-columns:1fr}.client-preview{width:100%;height:auto;aspect-ratio:1}.client-row{grid-template-columns:1fr}}</style><h2>Productos, precios e imágenes</h2><p class="muted">Los cambios llegan automáticamente a la tableta. El código físico es de sólo lectura y únicamente puede cambiarlo EVETEC.</p>
     <form method="POST" action="/cliente/device/${encodeURIComponent(deviceId)}/update"><input type="hidden" name="csrf" value="${escaparHtml(csrf)}"><div class="client-products">${cards}</div><button>Guardar y actualizar tableta</button></form>
     <script>
-    async function imagenCuadrada(file){
-      if(!file.type.startsWith('image/')||file.size>10*1024*1024)throw new Error('Elegí una imagen PNG, JPG o WebP menor a 10 MB');
-      const bitmap=await createImageBitmap(file),size=192,canvas=document.createElement('canvas');
-      canvas.width=size;canvas.height=size;const ctx=canvas.getContext('2d');
-      ctx.fillStyle='#fff';ctx.fillRect(0,0,size,size);
-      const scale=Math.max(size/bitmap.width,size/bitmap.height),w=bitmap.width*scale,h=bitmap.height*scale;
-      ctx.drawImage(bitmap,(size-w)/2,(size-h)/2,w,h);bitmap.close();
-      return await new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('No se pudo procesar la imagen')),'image/png'));
-    }
     document.querySelectorAll('[data-client-upload]').forEach(input=>input.addEventListener('change',async()=>{
       const file=input.files&&input.files[0];if(!file)return;const slot=input.dataset.clientUpload;
-      const status=document.querySelector('[data-client-upload-status="'+slot+'"]');input.disabled=true;status.textContent='Optimizando imagen...';
-      try{const image=await imagenCuadrada(file);status.textContent='Subiendo '+Math.ceil(image.size/1024)+' KB...';
+      const status=document.querySelector('[data-client-upload-status="'+slot+'"]');input.disabled=true;status.textContent='Preparando editor...';
+      try{const image=await window.editarImagenVending(file);if(!image){status.textContent='Cambio de imagen cancelado';input.disabled=false;input.value='';return}status.textContent='Subiendo '+Math.ceil(image.size/1024)+' KB...';
         const response=await fetch('/cliente/device/${encodeURIComponent(deviceId)}/vending-image/'+slot,{method:'PUT',headers:{'Content-Type':'image/png','X-CSRF-Token':'${escaparHtml(csrf)}'},body:image});
         const data=await response.json().catch(()=>({}));if(!response.ok||!data.ok)throw new Error(data.error||'No se pudo guardar');
         status.textContent='Imagen optimizada y guardada';const preview=input.closest('.client-product').querySelector('.client-preview');
-        preview.innerHTML='<img alt="Vista previa">';preview.querySelector('img').src=URL.createObjectURL(image);input.disabled=false;
-      }catch(error){input.disabled=false;status.textContent=error.message}
+        preview.innerHTML='<img alt="Vista previa">';preview.querySelector('img').src=URL.createObjectURL(image);input.disabled=false;input.value='';
+      }catch(error){input.disabled=false;input.value='';status.textContent=error.message}
     }));
     document.querySelectorAll('[data-client-availability]').forEach(input=>input.addEventListener('change',async()=>{
       const stock=Number(input.closest('.client-product').querySelector('input[name^="stock_"]').value)||0;
@@ -3367,14 +3410,14 @@ app.get("/admin/vending", (req, res) => {
         <div class="row"><label>Código<input name="code_${index}" value="${escaparHtml(product.codigo)}" pattern="[1-9]{2}" maxlength="2" required></label><label>Precio ARS<input name="price_${index}" type="number" min="1" step="0.01" value="${Number(product.monto)}" required></label></div>
         <div class="row"><label>Stock<input name="stock_${index}" type="number" min="0" step="1" value="${Number(product.stock)}"></label><label>Color<input name="color_${index}" type="color" value="${escaparHtml(product.color)}"></label></div>
         <label>Imagen desde archivo<input type="file" accept="image/png,image/jpeg,image/webp" data-upload-slot="${index + 1}"></label>
-        <div class="upload-status" data-upload-status="${index + 1}">Redimensionado automático a 192 × 192</div>
+        <div class="upload-status" data-upload-status="${index + 1}">Podrás moverla y ajustar el zoom antes de guardarla</div>
         <label>O usar URL externa<input name="image_${index}" value="${escaparHtml(product.imagenUrl)}" maxlength="500" placeholder="https://..."></label>
         <label class="check"><input name="enabled_${index}" type="checkbox" data-admin-availability="${index + 1}" ${product.activo && Number(product.stock) > 0 ? "checked" : ""}> <span>${product.activo && Number(product.stock) > 0 ? "Disponible" : "Fuera de venta"}</span></label>
       </div>
     </article>`).join("");
   res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EVETEC | Expendedora</title><style>
-    :root{color-scheme:dark;--bg:#06111f;--panel:#102033;--line:#294158;--text:#f5f8fc;--muted:#91a4b7;--blue:#28c7e2;--green:#43dc90;--danger:#ff6678}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#153854,transparent 35%),var(--bg);color:var(--text);font:15px Segoe UI,Arial,sans-serif}main{width:min(1240px,calc(100% - 28px));margin:auto;padding:28px 0 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:18px}.brand{letter-spacing:.2em;color:var(--blue);font-weight:900}h1{margin:5px 0}h2{margin:0 0 8px}.muted{color:var(--muted)}nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0}.tab,.button,.secondary,.danger{display:inline-flex;align-items:center;justify-content:center;padding:11px 15px;border-radius:10px;border:1px solid var(--line);background:#142a40;color:var(--text);text-decoration:none;font-weight:800;cursor:pointer}.active,.button{background:var(--blue);color:#021319;border-color:transparent}.danger{background:#481d29;color:#ffb8c1;border-color:#7c3040}.status,.pill{padding:9px 13px;border-radius:999px;background:${d.online ? "#123d2d" : "#42202a"};color:${d.online ? "#85f2b9" : "#ffb4bd"};font-weight:800}.pill{display:inline-flex;background:#172d42;color:var(--muted)}.pill.ok{background:#123d2d;color:#85f2b9}.pill.wait{background:#493b18;color:#ffe59a}.billing{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:16px;background:linear-gradient(135deg,#10263b,#0c1928);border:1px solid #31516c;padding:20px;border-radius:18px;margin-bottom:18px}.billing-fields{display:grid;grid-template-columns:1.2fr .55fr .55fr;gap:10px;margin:16px 0}.billing label{display:grid;gap:5px;color:var(--muted);font-size:12px}.billing-actions{display:flex;gap:9px;flex-wrap:wrap}.account-data{display:grid;grid-template-columns:auto 1fr;gap:8px 14px;margin:14px 0}.account-data span{color:var(--muted)}.qr-panel{display:grid;justify-items:center;align-content:center;gap:10px;min-height:240px;padding:15px;background:#071624;border:1px solid var(--line);border-radius:14px;text-align:center}.qr-panel canvas{width:190px;height:190px;background:white;border:10px solid white;border-radius:8px;image-rendering:pixelated}.qr-link{width:100%;font-size:11px}.toolbar{display:grid;grid-template-columns:1fr auto;gap:12px;background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:16px;margin-bottom:16px}input{width:100%;padding:10px;background:#071624;color:var(--text);border:1px solid var(--line);border-radius:9px;font:inherit}input[type=color],input[type=checkbox]{width:auto}.levels{display:grid;gap:12px}.level{display:grid;grid-template-columns:repeat(8,1fr);gap:10px}.level.featured{grid-template-columns:repeat(4,1fr)}.product{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden}.preview{height:105px;display:grid;place-items:center;background:linear-gradient(145deg,var(--accent),#071624);font-size:30px}.preview img{width:100%;height:100%;object-fit:contain}.fields{padding:11px;display:grid;gap:8px}.fields label{display:grid;gap:4px;color:var(--muted);font-size:11px}.row{display:grid;grid-template-columns:1fr 1.4fr;gap:7px}.check{display:flex!important;align-items:center;gap:7px}.upload-status{min-height:16px;color:var(--muted);font-size:10px}.upload-status.ok{color:var(--green)}.upload-status.error{color:#ff9da8}.save{position:sticky;bottom:12px;display:flex;justify-content:flex-end;margin-top:18px}.button{border:0;font-size:16px}@media(max-width:1050px){.level,.level.featured{grid-template-columns:repeat(4,1fr)}}@media(max-width:760px){.billing{grid-template-columns:1fr}.billing-fields{grid-template-columns:1fr 1fr}.billing-fields label:first-child{grid-column:1/-1}}@media(max-width:650px){.level,.level.featured{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}}
-  </style></head><body><main><header><div><div class="brand">EVETEC</div><h1>${escaparHtml(cfg.nombre)}</h1><div class="muted">${escaparHtml(id)} · catálogo v${Number(cfg.version)}</div></div><span class="status">${d.online ? "Tableta online" : "Tableta offline"}</span></header>
+    :root{color-scheme:dark;--bg:#06111f;--panel:#102033;--line:#294158;--text:#f5f8fc;--muted:#91a4b7;--blue:#28c7e2;--green:#43dc90;--danger:#ff6678}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#153854,transparent 35%),var(--bg);color:var(--text);font:15px Segoe UI,Arial,sans-serif}main{width:min(1240px,calc(100% - 28px));margin:auto;padding:28px 0 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:18px}.brand{letter-spacing:.2em;color:var(--blue);font-weight:900}h1{margin:5px 0}h2{margin:0 0 8px}.muted{color:var(--muted)}nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0}.tab,.button,.secondary,.danger{display:inline-flex;align-items:center;justify-content:center;padding:11px 15px;border-radius:10px;border:1px solid var(--line);background:#142a40;color:var(--text);text-decoration:none;font-weight:800;cursor:pointer}.active,.button{background:var(--blue);color:#021319;border-color:transparent}.danger{background:#481d29;color:#ffb8c1;border-color:#7c3040}.status,.pill{padding:9px 13px;border-radius:999px;background:${d.online ? "#123d2d" : "#42202a"};color:${d.online ? "#85f2b9" : "#ffb4bd"};font-weight:800}.pill{display:inline-flex;background:#172d42;color:var(--muted)}.pill.ok{background:#123d2d;color:#85f2b9}.pill.wait{background:#493b18;color:#ffe59a}.billing{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:16px;background:linear-gradient(135deg,#10263b,#0c1928);border:1px solid #31516c;padding:20px;border-radius:18px;margin-bottom:18px}.billing-fields{display:grid;grid-template-columns:1.2fr .55fr .55fr;gap:10px;margin:16px 0}.billing label{display:grid;gap:5px;color:var(--muted);font-size:12px}.billing-actions{display:flex;gap:9px;flex-wrap:wrap}.account-data{display:grid;grid-template-columns:auto 1fr;gap:8px 14px;margin:14px 0}.account-data span{color:var(--muted)}.qr-panel{display:grid;justify-items:center;align-content:center;gap:10px;min-height:240px;padding:15px;background:#071624;border:1px solid var(--line);border-radius:14px;text-align:center}.qr-panel canvas{width:190px;height:190px;background:white;border:10px solid white;border-radius:8px;image-rendering:pixelated}.qr-link{width:100%;font-size:11px}.toolbar{display:grid;grid-template-columns:1fr auto;gap:12px;background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:16px;margin-bottom:16px}input{width:100%;padding:10px;background:#071624;color:var(--text);border:1px solid var(--line);border-radius:9px;font:inherit}input[type=color],input[type=checkbox]{width:auto}.levels{display:grid;gap:12px}.level{display:grid;grid-template-columns:repeat(8,1fr);gap:10px}.level.featured{grid-template-columns:repeat(4,1fr)}.product{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden}.preview{height:105px;display:grid;place-items:center;overflow:hidden;background:linear-gradient(145deg,var(--accent),#071624);font-size:30px}.preview img{width:100%;height:100%;object-fit:cover}.fields{padding:11px;display:grid;gap:8px}.fields label{display:grid;gap:4px;color:var(--muted);font-size:11px}.row{display:grid;grid-template-columns:1fr 1.4fr;gap:7px}.check{display:flex!important;align-items:center;gap:7px}.upload-status{min-height:16px;color:var(--muted);font-size:10px}.upload-status.ok{color:var(--green)}.upload-status.error{color:#ff9da8}.save{position:sticky;bottom:12px;display:flex;justify-content:flex-end;margin-top:18px}.button{border:0;font-size:16px}@media(max-width:1050px){.level,.level.featured{grid-template-columns:repeat(4,1fr)}}@media(max-width:760px){.billing{grid-template-columns:1fr}.billing-fields{grid-template-columns:1fr 1fr}.billing-fields label:first-child{grid-column:1/-1}}@media(max-width:650px){.level,.level.featured{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}}
+  </style></head><body>${editorImagenVendingHtml()}<main><header><div><div class="brand">EVETEC</div><h1>${escaparHtml(cfg.nombre)}</h1><div class="muted">${escaparHtml(id)} · catálogo v${Number(cfg.version)}</div></div><span class="status">${d.online ? "Tableta online" : "Tableta offline"}</span></header>
   <nav><a class="tab active" href="/admin/vending?device=${encodeURIComponent(id)}">Productos y precios</a><a class="tab" href="#cuenta-cobro">Vincular cobro</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}">Cobros y módulos</a><a class="tab" href="/admin?device=${encodeURIComponent(PROTOTYPE_DEVICE_ID)}#client-account-form">Accesos de clientes</a><a class="tab" href="/logout">Salir</a></nav>
   <section class="billing" id="cuenta-cobro">
     <div>
@@ -3402,23 +3445,15 @@ app.get("/admin/vending", (req, res) => {
   <div class="levels"><section class="level featured">${productCards.split('</article>').slice(0,4).map(x=>x+'</article>').join('')}</section>${[4,12,20,28].map(start => `<section class="level">${productCards.split('</article>').slice(start,start+8).map(x=>x+'</article>').join('')}</section>`).join('')}</div>
   <div class="save"><button class="button" type="submit">Guardar y actualizar tableta</button></div></form>
   <script>
-    async function imagenVendingCuadrada(file) {
-      if (!file.type.startsWith('image/') || file.size > 10 * 1024 * 1024) throw new Error('Elegí una imagen menor a 10 MB');
-      const bitmap = await createImageBitmap(file), size = 192, canvas = document.createElement('canvas');
-      canvas.width = size; canvas.height = size; const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
-      const scale = Math.max(size / bitmap.width, size / bitmap.height), width = bitmap.width * scale, height = bitmap.height * scale;
-      ctx.drawImage(bitmap, (size - width) / 2, (size - height) / 2, width, height); bitmap.close();
-      return await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('No se pudo procesar la imagen')), 'image/png'));
-    }
     document.querySelectorAll('[data-upload-slot]').forEach(input => input.addEventListener('change', async () => {
       const file = input.files && input.files[0];
       if (!file) return;
       const slot = input.dataset.uploadSlot;
       const status = document.querySelector('[data-upload-status="' + slot + '"]');
-      input.disabled = true; status.className = 'upload-status'; status.textContent = 'Optimizando imagen...';
+      input.disabled = true; status.className = 'upload-status'; status.textContent = 'Preparando editor...';
       try {
-        const image = await imagenVendingCuadrada(file);
+        const image = await window.editarImagenVending(file);
+        if (!image) { status.textContent = 'Cambio de imagen cancelado'; input.disabled = false; input.value = ''; return; }
         status.textContent = 'Subiendo ' + Math.ceil(image.size / 1024) + ' KB...';
         const response = await fetch('/admin/vending/${encodeURIComponent(id)}/image/' + slot, { method:'PUT', headers:{'Content-Type':'image/png'}, body:image });
         const data = await response.json().catch(() => ({}));
@@ -3426,7 +3461,7 @@ app.get("/admin/vending", (req, res) => {
         status.className = 'upload-status ok'; status.textContent = 'Imagen guardada; actualizando vista...';
         location.reload();
       } catch (error) {
-        input.disabled = false; status.className = 'upload-status error'; status.textContent = error.message;
+        input.disabled = false; input.value = ''; status.className = 'upload-status error'; status.textContent = error.message;
       }
     }));
     document.querySelectorAll('[data-admin-availability]').forEach(input => input.addEventListener('change', async () => {
