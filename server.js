@@ -35,6 +35,7 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 let databasePool = null;
 let databaseReady = false;
 let databaseSaveTimer = null;
+let localSnapshotLoaded = false;
 let databaseWriteQueue = Promise.resolve();
 let configStore = new DeviceConfigStore({ persistentRequired: Boolean(DATABASE_URL) || process.env.RENDER === "true" });
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
@@ -673,6 +674,7 @@ function cargarDatos() {
     const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
 
     aplicarSnapshot(data);
+    localSnapshotLoaded = Boolean(data.devices && typeof data.devices === "object");
 
     if (!devices[PROTOTYPE_DEVICE_ID]) {
       devices[PROTOTYPE_DEVICE_ID] = nuevoPrototypeDevice();
@@ -4849,6 +4851,9 @@ setInterval(() => {
 
 async function startServer() {
   await iniciarPersistencia();
+  if (DATABASE_URL && !databaseReady && !localSnapshotLoaded) {
+    throw new Error("No se pudo restaurar la base de datos y no hay configuración local válida. Se reintentará al reiniciar para evitar usar valores por defecto.");
+  }
   app.listen(PORT, "0.0.0.0", () => {
   console.log("=======================================");
   console.log(" SERVER DUAL - PREMIUM + BASIC");
