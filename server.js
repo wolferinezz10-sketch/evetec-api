@@ -5,12 +5,21 @@ const fs = require("fs");
 const crypto = require("crypto");
 const { Pool } = require("pg");
 const { DeviceConfigStore, writeJsonAtomic, configError } = require("./device-config-store");
+const { panelMobileHtml } = require("./panel-mobile");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use((req, res, next) => {
+  if (req.method === "GET" && ["/admin", "/admin/vending", "/cliente"].includes(req.path)) {
+    const send = res.send.bind(res);
+    res.send = body => send(res.statusCode === 200 && typeof body === "string" && body.includes("</body>")
+      ? body.replace("</body>", `${panelMobileHtml(req.path.startsWith("/admin") ? "admin" : "client")}</body>`) : body);
+  }
+  next();
+});
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://evetec-api.onrender.com";
@@ -40,6 +49,106 @@ let databaseWriteQueue = Promise.resolve();
 let configStore = new DeviceConfigStore({ persistentRequired: Boolean(DATABASE_URL) || process.env.RENDER === "true" });
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
 const oauthStates = new Map();
+const oauthWriteQueues = new Map();
+
+function huellaSolicitudOauth(request) {
+  return crypto.createHash("sha256").update(String(request?.shareToken || "")).digest("hex");
+}
+
+function errorStatusOauth(error) {
+  return Number(error.status || error.statusCode) === 410 ? 410 : 503;
+}
+
+function crearEstadoOauth(deviceId, participantId, request) {
+  const secret = CLIENT_SESSION_SECRET || MP_CLIENT_SECRET;
+  if (!secret) throw new Error("Falta la clave para proteger la vinculación.");
+  const body = Buffer.from(JSON.stringify({
+    deviceId, participantId: participantId || "", exp: Date.now() + 10 * 60 * 1000,
+    nonce: crypto.randomBytes(16).toString("hex"), requestFingerprint: huellaSolicitudOauth(request)
+  })).toString("base64url");
+  const signature = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function leerEstadoOauth(token) {
+  try {
+    const [body, signature, extra] = String(token || "").split(".");
+    if (!signature) {
+      const legacy = oauthStates.get(String(token || ""));
+      if (!legacy || legacy.expiresAt < Date.now()) return null;
+      return { ...legacy, exp: legacy.expiresAt, legacy: true };
+    }
+    if (extra || body.length > 2048) return null;
+    const secret = CLIENT_SESSION_SECRET || MP_CLIENT_SECRET;
+    if (!secret) return null;
+    const expected = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    if (!comparacionSegura(signature, expected)) return null;
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!payload.deviceId || !payload.nonce || !payload.requestFingerprint ||
+        !Number.isFinite(payload.exp) || payload.exp < Date.now()) return null;
+    return payload;
+  } catch (_) { return null; }
+}
+
+function solicitudOauthVigente(device, state) {
+  if (!device || !state || state.exp < Date.now()) return false;
+  const participantId = String(state.participantId || "").toLowerCase();
+  const request = participantId ? device.participantLinkRequest : device.ownerLinkRequest;
+  if (!request?.shareToken || (participantId && request.participantId !== participantId)) return false;
+  if (state.legacy) {
+    // A cached old-format state is accepted only for the still-current request.
+    return new Date(request.requestedAt || 0).getTime() <= Number(state.expiresAt) - 10 * 60 * 1000;
+  }
+  return comparacionSegura(state.requestFingerprint, huellaSolicitudOauth(request));
+}
+
+function guardarVinculacionEquipo(deviceId, update) {
+  const previousQueue = oauthWriteQueues.get(deviceId) || Promise.resolve();
+  const operation = previousQueue.catch(() => {}).then(async () => {
+    const keys = ["participantes", "cantidadParticipantes", "comisionEvetecPorcentaje", "pagadorComisionMp", "modoCobro",
+      "participantLinkRequest", "ownerLinkRequest", "ownerAccessToken", "ownerRefreshToken", "ownerAccessTokenExpiresAt",
+      "ownerUserId", "ownerLinked", "ownerEmail"];
+    let result;
+    let patch;
+    let participantPatches;
+    const merge = current => {
+      const merged = { ...current, ...patch };
+      if (participantPatches) merged.participantes = current.participantes.map(participant => ({
+        ...participant, ...(participantPatches.get(participant.id) || {})
+      }));
+      return merged;
+    };
+    await guardarDatosConfirmado({
+      snapshot: () => {
+        // Build the candidate only when its PostgreSQL write reaches the queue.
+        // Heartbeats continue to see and save the last confirmed credentials.
+        const current = asegurarDevice(deviceId);
+        const candidate = structuredClone(current);
+        result = update(candidate);
+        patch = Object.fromEntries(keys.filter(key => key !== "participantes" &&
+          JSON.stringify(candidate[key]) !== JSON.stringify(current[key])).map(key => [key, candidate[key]]));
+        participantPatches = new Map();
+        for (const participant of candidate.participantes) {
+          const previous = current.participantes.find(item => item.id === participant.id) || {};
+          const changes = Object.fromEntries(Object.entries(participant).filter(([key, value]) =>
+            JSON.stringify(value) !== JSON.stringify(previous[key])));
+          if (Object.keys(changes).length) participantPatches.set(participant.id, changes);
+        }
+        return snapshotDatos({ [deviceId]: merge(current) });
+      },
+      publish: () => {
+        const current = asegurarDevice(deviceId);
+        // Do not replace a whole device: a concurrent price change or token
+        // refresh can complete while this database request is in flight.
+        Object.assign(current, merge(current));
+      }
+    });
+    return result;
+  });
+  oauthWriteQueues.set(deviceId, operation);
+  operation.finally(() => { if (oauthWriteQueues.get(deviceId) === operation) oauthWriteQueues.delete(deviceId); }).catch(() => {});
+  return operation;
+}
 
 function invalidarOauthParticipante(deviceId, participantId) {
   const normalizedDeviceId = String(deviceId || "").trim().toUpperCase();
@@ -562,10 +671,13 @@ function asegurarEstructuraConfig() {
   delete configGlobal.promoGlobal;
 }
 
+function snapshotDatos(deviceOverrides = {}) {
+  return { devices: { ...devices, ...deviceOverrides }, pagosCreados, usageEvents, configGlobal, clientAccounts };
+}
+
 function guardarDatos() {
-  const snapshot = { devices, pagosCreados, usageEvents, configGlobal, clientAccounts };
   try {
-    writeJsonAtomic(DATA_FILE, snapshot);
+    writeJsonAtomic(DATA_FILE, snapshotDatos());
   } catch (err) {
     console.error("Error guardando datos:", err.message);
   }
@@ -573,11 +685,15 @@ function guardarDatos() {
     if (databaseSaveTimer) return;
     databaseSaveTimer = setTimeout(async () => {
       databaseSaveTimer = null;
-      const payload = JSON.stringify({ devices, pagosCreados, usageEvents, configGlobal, clientAccounts });
-      databaseWriteQueue = databaseWriteQueue.catch(() => {}).then(() => databasePool.query(
-        `INSERT INTO evetec_state (id, payload, updated_at) VALUES ('main', $1::jsonb, NOW())
-         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`, [payload]
-      ));
+      databaseWriteQueue = databaseWriteQueue.catch(() => {}).then(() => {
+        // Capture after earlier confirmed writes have published, never before
+        // waiting: an old heartbeat must not overwrite a later OAuth commit.
+        const payload = JSON.stringify(snapshotDatos());
+        return databasePool.query(
+          `INSERT INTO evetec_state (id, payload, updated_at) VALUES ('main', $1::jsonb, NOW())
+           ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`, [payload]
+        );
+      });
       try {
         await databaseWriteQueue;
       } catch (err) {
@@ -589,6 +705,30 @@ function guardarDatos() {
 
 function campoConfiguracion(d) {
   return d.tipo === "gachapon" ? "configuracionGachapon" : d.tipo === "vending" ? "configuracionVending" : "configuracionServicio";
+}
+
+async function guardarDatosConfirmado({ snapshot = snapshotDatos, publish = () => {} } = {}) {
+  if (databaseSaveTimer) { clearTimeout(databaseSaveTimer); databaseSaveTimer = null; }
+  const operation = databaseWriteQueue.catch(() => {}).then(async () => {
+    if (!databaseReady || !databasePool) {
+      if (DATABASE_URL || process.env.RENDER === "true") throw configError("La base de datos no está disponible. Intentá nuevamente.");
+      writeJsonAtomic(DATA_FILE, snapshot());
+      publish();
+      return;
+    }
+    const payload = JSON.stringify(snapshot());
+    await databasePool.query(
+      `INSERT INTO evetec_state (id, payload, updated_at) VALUES ('main', $1::jsonb, NOW())
+       ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`, [payload]
+    );
+    // Publish before this queue turn is released so queued heartbeat snapshots
+    // can only observe the confirmed version. A failed query publishes nothing.
+    publish();
+    try { writeJsonAtomic(DATA_FILE, snapshotDatos()); }
+    catch (error) { console.error("No se pudo actualizar el respaldo local:", error.message); }
+  });
+  databaseWriteQueue = operation;
+  await operation;
 }
 
 async function guardarConfiguracionEquipo(deviceId, candidate, { expectedRevision, operational = {} } = {}) {
@@ -2395,10 +2535,10 @@ app.post("/device/usage-sync", requireDevice, (req, res) => {
 // OAUTH MERCADO PAGO - VINCULAR DUEÑO
 // =====================================================
 
-app.get("/oauth/link/:deviceId", (req, res) => {
+app.get("/oauth/link/:deviceId", async (req, res) => {
   try {
     const deviceId = String(req.params.deviceId || "").toUpperCase();
-    asegurarDevice(deviceId);
+    const device = asegurarDevice(deviceId);
 
     if (!MP_CLIENT_ID) {
       return res.json({
@@ -2409,18 +2549,13 @@ app.get("/oauth/link/:deviceId", (req, res) => {
       });
     }
 
-    const stateToken = crypto.randomBytes(24).toString("hex");
-    oauthStates.set(stateToken, { deviceId, expiresAt: Date.now() + 10 * 60 * 1000 });
-    for (const [key, value] of oauthStates) {
-      if (value.expiresAt < Date.now()) oauthStates.delete(key);
+    if (!device.ownerLinkRequest?.shareToken) {
+      await guardarVinculacionEquipo(deviceId, d => {
+        d.ownerLinkRequest = { shareToken: crypto.randomBytes(24).toString("hex"), requestedAt: new Date().toISOString() };
+      });
     }
-
-    const url =
-      "https://auth.mercadopago.com.ar/authorization" +
-      `?response_type=code` +
-      `&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
-      `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-      `&state=${encodeURIComponent(stateToken)}`;
+    // Keep the URL short enough for the version-12 QR encoded by existing firmware.
+    const url = `${PUBLIC_BASE_URL}/vincular-dueno/${encodeURIComponent(deviceId)}/${encodeURIComponent(device.ownerLinkRequest.shareToken)}`;
 
     const qr = generarQRMatrix(url);
 
@@ -2431,16 +2566,32 @@ app.get("/oauth/link/:deviceId", (req, res) => {
       qr_matrix: qr.qr_matrix
     });
   } catch (err) {
-    res.json({
+    res.status(503).json({
       ok: false,
-      error: err.message,
+      error: "No se pudo confirmar la solicitud de vinculación. Intentá nuevamente.",
       qr_size: 0,
       qr_matrix: ""
     });
   }
 });
 
-app.get("/oauth/participant-link/:deviceId/:participantId", (req, res) => {
+app.get("/vincular-dueno/:deviceId/:shareToken", (req, res) => {
+  const deviceId = String(req.params.deviceId || "").trim().toUpperCase();
+  const shareToken = String(req.params.shareToken || "");
+  const request = devices[deviceId]?.ownerLinkRequest;
+  if (!request?.shareToken || !comparacionSegura(shareToken, request.shareToken)) {
+    return res.status(410).send("<h2>Vinculación no disponible</h2><p>El enlace fue cancelado, reemplazado o ya se utilizó.</p>");
+  }
+  if (!MP_CLIENT_ID) return res.status(503).send("<h2>Vinculación temporalmente no disponible</h2>");
+  let stateToken;
+  try { stateToken = crearEstadoOauth(deviceId, "", request); }
+  catch (_) { return res.status(503).send("<h2>Vinculación temporalmente no disponible</h2>"); }
+  return res.redirect("https://auth.mercadopago.com.ar/authorization" +
+    `?response_type=code&client_id=${encodeURIComponent(MP_CLIENT_ID)}` +
+    `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&state=${encodeURIComponent(stateToken)}`);
+});
+
+app.get("/oauth/participant-link/:deviceId/:participantId", async (req, res) => {
   try {
     const deviceId = String(req.params.deviceId || "").trim().toUpperCase();
     const participantId = String(req.params.participantId || "").trim().toLowerCase();
@@ -2454,8 +2605,10 @@ app.get("/oauth/participant-link/:deviceId/:participantId", (req, res) => {
     }
     if (!MP_CLIENT_ID) return res.status(503).json({ ok: false, error: "Falta MP_CLIENT_ID" });
     if (!d.participantLinkRequest.shareToken) {
-      d.participantLinkRequest.shareToken = crypto.randomBytes(24).toString("hex");
-      guardarDatos();
+      await guardarVinculacionEquipo(deviceId, current => {
+        if (current.participantLinkRequest?.participantId !== participantId) throw configError("Vinculación cancelada.", 410);
+        current.participantLinkRequest.shareToken = crypto.randomBytes(24).toString("hex");
+      });
     }
     const url = `${PUBLIC_BASE_URL}/vincular/${encodeURIComponent(deviceId)}/${encodeURIComponent(participantId)}/${encodeURIComponent(d.participantLinkRequest.shareToken)}`;
     const qr = generarQRMatrix(url);
@@ -2468,7 +2621,7 @@ app.get("/oauth/participant-link/:deviceId/:participantId", (req, res) => {
       qr_matrix: qr.qr_matrix
     });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(errorStatusOauth(err)).json({ ok: false, error: "No se pudo confirmar la solicitud de vinculación. Intentá nuevamente." });
   }
 });
 
@@ -2486,12 +2639,9 @@ app.get("/vincular/:deviceId/:participantId/:shareToken", (req, res) => {
   }
   if (!MP_CLIENT_ID) return res.status(503).send("<h2>Vinculación temporalmente no disponible</h2>");
 
-  invalidarOauthParticipante(deviceId, participantId);
-  const stateToken = crypto.randomBytes(24).toString("hex");
-  oauthStates.set(stateToken, { deviceId, participantId, expiresAt: Date.now() + 10 * 60 * 1000 });
-  for (const [key, value] of oauthStates) {
-    if (value.expiresAt < Date.now()) oauthStates.delete(key);
-  }
+  let stateToken;
+  try { stateToken = crearEstadoOauth(deviceId, participantId, request); }
+  catch (_) { return res.status(503).send("<h2>Vinculación temporalmente no disponible</h2>"); }
   const authorizationUrl =
     "https://auth.mercadopago.com.ar/authorization" +
     `?response_type=code` +
@@ -2504,22 +2654,22 @@ app.get("/vincular/:deviceId/:participantId/:shareToken", (req, res) => {
 app.get("/oauth/callback", async (req, res) => {
   const code = req.query.code;
   const stateToken = String(req.query.state || "");
-  const stateData = oauthStates.get(stateToken);
+  const stateData = leerEstadoOauth(stateToken);
   oauthStates.delete(stateToken);
-  const deviceId = stateData && stateData.expiresAt >= Date.now()
+  const deviceId = stateData
     ? String(stateData.deviceId || "").toUpperCase()
     : "";
-  const participantId = stateData && stateData.expiresAt >= Date.now()
+  const participantId = stateData
     ? String(stateData.participantId || "").toLowerCase()
     : "";
 
-  if (!code || !deviceId) {
-    return res.send("<h2>Sistema</h2><p>Faltan datos de autorización.</p>");
+  const currentDevice = devices[deviceId];
+  if (!deviceId || !solicitudOauthVigente(currentDevice, stateData)) {
+    return res.status(410).send("<h2>Vinculación no disponible</h2><p>El enlace fue cancelado, reemplazado, ya se utilizó o venció. Volvé a abrir el enlace actual.</p>");
   }
+  if (!code) return res.status(400).send("<h2>Vinculación no completada</h2><p>No se recibió la autorización de Mercado Pago. Podés volver a abrir el enlace para intentarlo nuevamente.</p>");
 
   try {
-    const d = asegurarDevice(deviceId);
-
     const r = await fetchConTimeout("https://api.mercadopago.com/oauth/token", {
       method: "POST",
       headers: {
@@ -2539,33 +2689,35 @@ app.get("/oauth/callback", async (req, res) => {
     if (!r.ok) {
       console.error("Error OAuth Mercado Pago:", data);
 
-      return res.send(`
+      return res.status(502).send(`
         <h2>Sistema</h2>
         <p>Error vinculando cuenta Mercado Pago.</p>
         <pre>${escaparHtml(JSON.stringify(data, null, 2))}</pre>
       `);
     }
 
-    let linkedName = "Cuenta dueña";
-    if (participantId) {
-      const participant = d.participantes.find(p => p.id === participantId);
-      if (!participant || participantId === "p1") throw new Error("Participante inválido");
-      participant.accessToken = data.access_token;
-      participant.refreshToken = data.refresh_token || null;
-      participant.accessTokenExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
-      participant.userId = data.user_id || null;
-      participant.linked = true;
-      linkedName = participant.nombre || participantId;
-      if (d.participantLinkRequest?.participantId === participantId) d.participantLinkRequest = null;
-    } else {
+    if (!data.access_token) throw new Error("Mercado Pago no devolvió una autorización válida.");
+    const linkedName = await guardarVinculacionEquipo(deviceId, d => {
+      if (!solicitudOauthVigente(d, stateData)) throw configError("La solicitud fue cancelada o reemplazada durante la autorización.", 410);
+      if (participantId) {
+        const participant = d.participantes.find(p => p.id === participantId);
+        if (!participant || participantId === "p1") throw new Error("Participante inválido");
+        participant.accessToken = data.access_token;
+        participant.refreshToken = data.refresh_token || null;
+        participant.accessTokenExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
+        participant.userId = data.user_id || null;
+        participant.linked = true;
+        d.participantLinkRequest = null;
+        return participant.nombre || participantId;
+      }
       d.ownerAccessToken = data.access_token;
       d.ownerRefreshToken = data.refresh_token || null;
       d.ownerAccessTokenExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
       d.ownerUserId = data.user_id || null;
       d.ownerLinked = true;
-    }
-
-    guardarDatos();
+      d.ownerLinkRequest = null;
+      return "Cuenta dueña";
+    });
 
     res.send(`
       <html>
@@ -2590,7 +2742,7 @@ app.get("/oauth/callback", async (req, res) => {
   } catch (err) {
     console.error("Error /oauth/callback:", err);
 
-    res.send(`
+    res.status(errorStatusOauth(err)).send(`
       <h2>Sistema</h2>
       <p>Error interno vinculando cuenta.</p>
       <pre>${escaparHtml(err.message)}</pre>
@@ -2598,19 +2750,22 @@ app.get("/oauth/callback", async (req, res) => {
   }
 });
 
-app.post("/unlink-owner/:deviceId", requireAdmin, (req, res) => {
+app.post("/unlink-owner/:deviceId", requireAdmin, async (req, res) => {
   if (String(req.body.confirmation || "").trim().toUpperCase() !== "DESVINCULAR") {
     return res.status(400).send("Confirmación requerida. La cuenta no fue modificada.");
   }
-  const d = asegurarDevice(req.params.deviceId);
-
-  d.ownerLinked = false;
-  d.ownerAccessToken = null;
-  d.ownerRefreshToken = null;
-  d.ownerUserId = null;
-  d.ownerEmail = "";
-
-  guardarDatos();
+  const deviceId = String(req.params.deviceId || "").trim().toUpperCase();
+  try {
+    await guardarVinculacionEquipo(deviceId, d => {
+      d.ownerLinked = false;
+      d.ownerAccessToken = null;
+      d.ownerRefreshToken = null;
+      d.ownerUserId = null;
+      d.ownerEmail = "";
+      d.ownerLinkRequest = null;
+    });
+    invalidarOauthParticipante(deviceId, "");
+  } catch (_) { return res.status(503).send("No se pudo confirmar la desvinculación. Intentá nuevamente."); }
 
   res.redirect(`/admin?device=${encodeURIComponent(String(req.params.deviceId || "").toUpperCase())}`);
 });
@@ -3087,7 +3242,7 @@ app.get("/cliente", (req, res) => {
       <div class="grid">
         <label style="grid-column:1/-1">Texto principal del equipo<input name="nombre" maxlength="60" value="${escaparHtml(cfg.nombre)}" required></label>
         <label style="grid-column:1/-1">Título en pantalla<input name="titulo" maxlength="40" value="${escaparHtml(cfg.titulo ?? "")}"></label>
-        <label style="grid-column:1/-1">Mensaje<input name="mensaje" maxlength="100" value="${escaparHtml(cfg.mensaje ?? "")}"></label>
+        <label style="grid-column:1/-1">Mensaje<input name="mensaje" maxlength="100" value="${escaparHtml(cfg.mensaje ?? configGlobal.mensajeGlobal)}"></label>
         <label>Segundos por jugada<input name="segundosPorJugada" type="number" min="1" max="600" step="1" value="${Number(cfg.segundos_por_jugada ?? 30)}" required></label>
         ${cfg.planes.slice(0, Number(cfg.cantidad_opciones || 3)).map((plan,index)=>`<label>Precio · ${index+1} jugada${index ? "s" : ""}<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(plan.monto)}" required></label>`).join("")}
       </div>
@@ -3100,7 +3255,7 @@ app.get("/cliente", (req, res) => {
       <div class="grid">
         <label style="grid-column:1/-1">Texto principal del equipo<input name="nombre" maxlength="60" value="${escaparHtml(cfg.nombre)}" required></label>
         <label style="grid-column:1/-1">Descripción<input name="descripcion" maxlength="120" value="${escaparHtml(cfg.descripcion ?? "")}"></label>
-        <label style="grid-column:1/-1">Mensaje<input name="mensaje" maxlength="100" value="${escaparHtml(cfg.mensaje ?? "")}"></label>
+        <label style="grid-column:1/-1">Mensaje<input name="mensaje" maxlength="100" value="${escaparHtml(cfg.mensaje ?? configGlobal.mensajeGlobal)}"></label>
         <label>Precio (ARS)<input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></label>
         <label>Minutos<input name="minutos" type="number" min="0" max="60" step="1" value="${Math.floor(Number(cfg.segundos)/60)}" required></label>
         <label>Segundos<input name="segundosServicio" type="number" min="0" max="59" step="1" value="${Number(cfg.segundos)%60}" required></label>
@@ -3380,7 +3535,7 @@ app.get("/admin", (req, res) => {
             <div class="field"><label>Duración: segundos</label><input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos) % 60}" required></div>
             <div class="field"><label>Espera antes de encender (segundos)</label><input name="preinicioSegundos" type="number" min="0" max="120" value="${Number(cfg.preinicioSegundos)}" required></div>
             <div class="field wide"><label>Descripción</label><input name="descripcion" value="${escaparHtml(cfg.descripcion)}" maxlength="120"></div>
-            <div class="field wide"><label>Mensaje</label><input name="mensaje" value="${escaparHtml(cfg.mensaje ?? "")}" maxlength="100"></div>
+            <div class="field wide"><label>Mensaje</label><input name="mensaje" value="${escaparHtml(cfg.mensaje ?? configGlobal.mensajeGlobal)}" maxlength="100"></div>
           </div>
           <div class="actions"><button class="btn primary" type="submit">Guardar cambios</button></div>
         </form>`;
@@ -4308,7 +4463,7 @@ app.get("/participant-status/:deviceId/:participantId", (req, res) => {
   });
 });
 
-app.post("/admin/device/:deviceId/participant-link-request", (req, res) => {
+app.post("/admin/device/:deviceId/participant-link-request", async (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const participantId = String(req.body.participantId || "").trim().toLowerCase();
   const participantNumber = Number(participantId.slice(1));
@@ -4318,35 +4473,40 @@ app.post("/admin/device/:deviceId/participant-link-request", (req, res) => {
   if (!participant || participantId === "p1" || !alias || participantNumber < 2 || participantNumber > MAX_PARTICIPANTS) {
     return res.status(400).json({ ok: false, error: "Elegí un participante y escribí su alias." });
   }
-  invalidarOauthParticipante(id, participantId);
-  participant.nombre = alias;
-  d.cantidadParticipantes = Math.max(d.cantidadParticipantes, participantNumber);
-  const requestedOwnerPercentage = Number(req.body.ownerPercentage);
-  if (d.tipo === "vending" && participantId === "p2" && Number.isFinite(requestedOwnerPercentage)) {
-    const ownerPercentage = Math.max(0, Math.min(100, Math.round(requestedOwnerPercentage * 100) / 100));
-    const evetecPercentage = Math.round((100 - ownerPercentage) * 100) / 100;
-    d.participantes[0].nombre = "EVETEC";
-    d.participantes[0].porcentaje = evetecPercentage;
-    participant.porcentaje = ownerPercentage;
-    d.cantidadParticipantes = Math.max(2, d.cantidadParticipantes);
-    d.comisionEvetecPorcentaje = evetecPercentage;
-    d.pagadorComisionMp = "proportional";
-    d.modoCobro = evetecPercentage >= 99.999
-      ? "evetec"
-      : (evetecPercentage > 0 ? "owner_commission" : "owner_direct");
+  try {
+    const invitationUrl = await guardarVinculacionEquipo(id, current => {
+      const currentParticipant = current.participantes.find(p => p.id === participantId);
+      currentParticipant.nombre = alias;
+      current.cantidadParticipantes = Math.max(current.cantidadParticipantes, participantNumber);
+      const requestedOwnerPercentage = Number(req.body.ownerPercentage);
+      if (current.tipo === "vending" && participantId === "p2" && Number.isFinite(requestedOwnerPercentage)) {
+        const ownerPercentage = Math.max(0, Math.min(100, Math.round(requestedOwnerPercentage * 100) / 100));
+        const evetecPercentage = Math.round((100 - ownerPercentage) * 100) / 100;
+        current.participantes[0].nombre = "EVETEC";
+        current.participantes[0].porcentaje = evetecPercentage;
+        currentParticipant.porcentaje = ownerPercentage;
+        current.cantidadParticipantes = Math.max(2, current.cantidadParticipantes);
+        current.comisionEvetecPorcentaje = evetecPercentage;
+        current.pagadorComisionMp = "proportional";
+        current.modoCobro = evetecPercentage >= 99.999
+          ? "evetec"
+          : (evetecPercentage > 0 ? "owner_commission" : "owner_direct");
+      }
+      current.participantLinkRequest = {
+        participantId, alias, requestedAt: new Date().toISOString(),
+        shareToken: crypto.randomBytes(24).toString("hex")
+      };
+      return `${PUBLIC_BASE_URL}/vincular/${encodeURIComponent(id)}/${encodeURIComponent(participantId)}/${encodeURIComponent(current.participantLinkRequest.shareToken)}`;
+    });
+    invalidarOauthParticipante(id, d.participantLinkRequest?.participantId || participantId);
+    invalidarOauthParticipante(id, participantId);
+    res.json({ ok: true, participant_id: participantId, alias, invitation_url: invitationUrl, message: "QR y enlace de vinculación disponibles" });
+  } catch (_) {
+    res.status(503).json({ ok: false, error: "No se pudo guardar la solicitud de vinculación. Intentá nuevamente." });
   }
-  d.participantLinkRequest = {
-    participantId,
-    alias,
-    requestedAt: new Date().toISOString(),
-    shareToken: crypto.randomBytes(24).toString("hex")
-  };
-  guardarDatos();
-  const invitationUrl = `${PUBLIC_BASE_URL}/vincular/${encodeURIComponent(id)}/${encodeURIComponent(participantId)}/${encodeURIComponent(d.participantLinkRequest.shareToken)}`;
-  res.json({ ok: true, participant_id: participantId, alias, invitation_url: invitationUrl, message: "QR y enlace de vinculación disponibles" });
 });
 
-app.post("/admin/device/:deviceId/participant-link-cancel", (req, res) => {
+app.post("/admin/device/:deviceId/participant-link-cancel", async (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const participantId = String(req.body.participantId || "").trim().toLowerCase();
   const d = asegurarDevice(id);
@@ -4357,19 +4517,19 @@ app.post("/admin/device/:deviceId/participant-link-cancel", (req, res) => {
   if (participantId && participantId !== pendingParticipantId) {
     return res.status(409).json({ ok: false, error: "Ese QR ya no es la vinculación pendiente." });
   }
-  const invalidatedStates = invalidarOauthParticipante(id, pendingParticipantId);
-  d.participantLinkRequest = null;
-  guardarDatos();
-  res.json({
-    ok: true,
-    canceled: true,
-    participant_id: pendingParticipantId,
-    invalidated_states: invalidatedStates,
-    message: "QR cancelado"
-  });
+  try {
+    await guardarVinculacionEquipo(id, current => {
+      if (current.participantLinkRequest?.participantId !== pendingParticipantId) throw configError("La solicitud ya cambió. Volvé a cargar el panel.", 410);
+      current.participantLinkRequest = null;
+    });
+    const invalidatedStates = invalidarOauthParticipante(id, pendingParticipantId);
+    res.json({ ok: true, canceled: true, participant_id: pendingParticipantId, invalidated_states: invalidatedStates, message: "QR cancelado" });
+  } catch (error) {
+    res.status(errorStatusOauth(error)).json({ ok: false, error: "No se pudo confirmar la cancelación. Volvé a cargar el panel e intentá nuevamente." });
+  }
 });
 
-app.post("/admin/device/:deviceId/participant-unlink", (req, res) => {
+app.post("/admin/device/:deviceId/participant-unlink", async (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const participantId = String(req.body.participantId || "").trim().toLowerCase();
   if (String(req.body.confirmation || "").trim().toUpperCase() !== "DESVINCULAR") {
@@ -4378,18 +4538,24 @@ app.post("/admin/device/:deviceId/participant-unlink", (req, res) => {
   const d = asegurarDevice(id);
   const participant = d.participantes.find(p => p.id === participantId);
   if (!participant || participantId === "p1") return res.status(400).json({ ok: false, error: "Participante inválido" });
-  participant.linked = false;
-  participant.accessToken = null;
-  participant.refreshToken = null;
-  participant.userId = null;
-  participant.email = "";
-  if (d.participantLinkRequest?.participantId === participantId) d.participantLinkRequest = null;
-  invalidarOauthParticipante(id, participantId);
-  guardarDatos();
-  res.json({ ok: true, participant_id: participantId, message: "Cuenta desvinculada para nuevos cobros" });
+  try {
+    await guardarVinculacionEquipo(id, current => {
+      const currentParticipant = current.participantes.find(p => p.id === participantId);
+      currentParticipant.linked = false;
+      currentParticipant.accessToken = null;
+      currentParticipant.refreshToken = null;
+      currentParticipant.userId = null;
+      currentParticipant.email = "";
+      if (current.participantLinkRequest?.participantId === participantId) current.participantLinkRequest = null;
+    });
+    invalidarOauthParticipante(id, participantId);
+    res.json({ ok: true, participant_id: participantId, message: "Cuenta desvinculada para nuevos cobros" });
+  } catch (_) {
+    res.status(503).json({ ok: false, error: "No se pudo confirmar la desvinculación. Intentá nuevamente." });
+  }
 });
 
-app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
+app.post("/admin/device/:deviceId/distribution-update", async (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   const d = asegurarDevice(id);
   const count = Math.max(1, Math.min(MAX_PARTICIPANTS, Math.round(Number(req.body.participantCount || 1))));
@@ -4411,16 +4577,22 @@ app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
   else if (!active.length) error = "Al menos un participante debe tener un porcentaje mayor a cero.";
   else if (Math.abs(total - 100) > 0.001) error = "Los participantes activos deben sumar exactamente 100%.";
   if (error) return res.redirect(adminDeviceUrl(id, `&dist_error=${encodeURIComponent(error)}`));
-  d.cantidadParticipantes = count;
-  d.participantes = participants;
-  d.pagadorComisionMp = "proportional";
-  const evetecPercentage = Math.max(0, Math.min(100, Number(participants[0]?.porcentaje || 0)));
-  d.comisionEvetecPorcentaje = evetecPercentage;
-  d.modoCobro = evetecPercentage >= 99.999
-    ? "evetec"
-    : (evetecPercentage > 0 ? "owner_commission" : "owner_direct");
-  guardarDatos();
-  res.redirect(adminDeviceUrl(id));
+  try {
+    await guardarVinculacionEquipo(id, current => {
+      current.cantidadParticipantes = count;
+      current.participantes = participants.map(participant => ({
+        ...current.participantes.find(existing => existing.id === participant.id),
+        id: participant.id, nombre: participant.nombre, porcentaje: participant.porcentaje
+      }));
+      current.pagadorComisionMp = "proportional";
+      const evetecPercentage = Math.max(0, Math.min(100, Number(participants[0]?.porcentaje || 0)));
+      current.comisionEvetecPorcentaje = evetecPercentage;
+      current.modoCobro = evetecPercentage >= 99.999
+        ? "evetec"
+        : (evetecPercentage > 0 ? "owner_commission" : "owner_direct");
+    });
+    res.redirect(adminDeviceUrl(id));
+  } catch (_) { res.status(503).send("No se pudo confirmar el reparto. Los porcentajes y cuentas anteriores se conservaron."); }
 });
 
 async function actualizarConfiguracionAdmin(req, res, deviceId) {
@@ -4547,7 +4719,7 @@ app.get("/admin/prototype/live-stats", (req, res) => {
   });
 });
 
-app.post("/admin/prototype/distribution-update", (req, res) => {
+app.post("/admin/prototype/distribution-update", async (req, res) => {
   const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
   const participants = PARTICIPANT_NUMBERS.map(index => ({
     id: `p${index}`,
@@ -4562,10 +4734,15 @@ app.post("/admin/prototype/distribution-update", (req, res) => {
   if (participants.some(p => (!p.nombre && p.porcentaje > 0) || (p.nombre && p.porcentaje <= 0))) {
     return res.redirect(`/admin?dist_error=${encodeURIComponent("Cada participante debe tener nombre y un porcentaje mayor a cero.")}`);
   }
-  d.participantes = participants;
-  d.pagadorComisionMp = "proportional";
-  guardarDatos();
-  res.redirect("/admin");
+  try {
+    await guardarVinculacionEquipo(PROTOTYPE_DEVICE_ID, current => {
+      current.participantes = participants.map(participant => ({
+        ...current.participantes.find(existing => existing.id === participant.id), ...participant
+      }));
+      current.pagadorComisionMp = "proportional";
+    });
+    res.redirect("/admin");
+  } catch (_) { res.status(503).send("No se pudo confirmar el reparto. Los porcentajes y cuentas anteriores se conservaron."); }
 });
 
 app.post("/admin/prototype/update", (req, res) => actualizarConfiguracionAdmin(req, res, PROTOTYPE_DEVICE_ID));

@@ -111,6 +111,7 @@ try {
   const plushFinance = finance(state().devices[plushId]);
   const adminHtml = await request(`/admin?device=${basicId}`, { headers: adminHeaders }).then(r => r.text());
   assert.ok(adminHtml.includes('name="mensaje"') && adminHtml.includes('name="configRevision"'));
+  assert.ok(adminHtml.includes('id="evetec-panel-mobile"') && adminHtml.includes("evetec-admin"), "El administrador debe incluir el panel adaptable sin cambiar las rutas del módulo");
   const adminRevision = adminHtml.match(/name="configRevision" value="(\d+)"/)[1];
   const adminSave = await request(`/admin/device/${basicId}/update`, {
     method: "POST", headers: { ...adminHeaders, "content-type": "application/x-www-form-urlencoded" },
@@ -129,6 +130,8 @@ try {
   assert.ok(clientCookie?.startsWith("evetec_client_session="));
   assert.equal((await request("/admin", { headers: { cookie: clientCookie } })).status, 401);
   const basicForm = await clientForm(basicId);
+  assert.ok(basicForm.html.includes('id="evetec-panel-mobile"') && basicForm.html.includes("evetec-client"), "El cliente debe incluir el mismo diseño móvil con navegación propia");
+  assert.ok(!/name="(?:participant_pct_\d+|ownerAccessToken|comisionEvetecPorcentaje)"/.test(basicForm.html), "El formulario del cliente no expone controles financieros");
   assert.ok(basicForm.html.includes('name="nombre"') && basicForm.html.includes('name="descripcion"') && basicForm.html.includes('name="mensaje"'));
   const injected = { modoCobro: "owner_direct", comision: "0", comisionEvetecPorcentaje: "0", participantes: "[]", ownerAccessToken: "ATTACK", ownerUserId: "ATTACK", activo: "off", mantenimiento: "on", preinicioSegundos: "0" };
   const save = await clientPost(basicId, { ...injected, nombre: "Mi inflador", descripcion: "Mi descripción", mensaje: "Bienvenidos", monto: "245.75", minutos: "2", segundosServicio: "7" });
@@ -192,7 +195,16 @@ try {
   }
   assert.deepEqual(state().devices[basicId].configuracionServicio, savedBasic);
   assert.equal(finance(state().devices[basicId]), basicFinance);
-  console.log("OK: admin y cliente guardan precio, tiempo y textos; destinatarios protegidos, concurrencia y conflictos controlados, reinicio conserva datos y falla PostgreSQL devuelve 503 sin publicar cambios. Sin llamadas externas.");
+  await stopServer();
+  fs.renameSync(dataFile, path.join(fixtureDir, "last-confirmed-state.json"));
+  await assert.rejects(
+    startServer("postgresql://local_test:local_test@127.0.0.1:1/evetec"),
+    /El servidor terminó antes de iniciar/,
+    "Sin base disponible ni respaldo válido, el servidor debe rechazar el arranque para no cobrar valores predeterminados"
+  );
+  assert.notEqual(child.exitCode, 0);
+  await assert.rejects(request("/health"), "El servidor sin configuración restaurada no debe escuchar peticiones");
+  console.log("OK: admin y cliente guardan precio, tiempo y textos; destinatarios protegidos, concurrencia y conflictos controlados, reinicio conserva datos, PostgreSQL caído devuelve 503 sin publicar cambios y arranque sin respaldo queda bloqueado. Sin llamadas externas.");
 } finally {
   await stopServer();
   fs.rmSync(fixtureDir, { recursive: true, force: true });
