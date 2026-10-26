@@ -4,6 +4,7 @@ const QRCode = require("qrcode");
 const fs = require("fs");
 const crypto = require("crypto");
 const { Pool } = require("pg");
+const { DeviceConfigStore, writeJsonAtomic, configError } = require("./device-config-store");
 
 const app = express();
 
@@ -34,6 +35,8 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 let databasePool = null;
 let databaseReady = false;
 let databaseSaveTimer = null;
+let databaseWriteQueue = Promise.resolve();
+let configStore = new DeviceConfigStore({ persistentRequired: Boolean(DATABASE_URL) || process.env.RENDER === "true" });
 const REDIRECT_URI = `${PUBLIC_BASE_URL}/oauth/callback`;
 const oauthStates = new Map();
 
@@ -561,27 +564,69 @@ function asegurarEstructuraConfig() {
 function guardarDatos() {
   const snapshot = { devices, pagosCreados, usageEvents, configGlobal, clientAccounts };
   try {
-    fs.writeFileSync(
-      DATA_FILE,
-      JSON.stringify(snapshot, null, 2)
-    );
+    writeJsonAtomic(DATA_FILE, snapshot);
   } catch (err) {
     console.error("Error guardando datos:", err.message);
   }
   if (databaseReady && databasePool) {
-    clearTimeout(databaseSaveTimer);
+    if (databaseSaveTimer) return;
     databaseSaveTimer = setTimeout(async () => {
+      databaseSaveTimer = null;
+      const payload = JSON.stringify({ devices, pagosCreados, usageEvents, configGlobal, clientAccounts });
+      databaseWriteQueue = databaseWriteQueue.catch(() => {}).then(() => databasePool.query(
+        `INSERT INTO evetec_state (id, payload, updated_at) VALUES ('main', $1::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`, [payload]
+      ));
       try {
-        await databasePool.query(
-          `INSERT INTO evetec_state (id, payload, updated_at) VALUES ('main', $1::jsonb, NOW())
-           ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
-          [JSON.stringify({ devices, pagosCreados, usageEvents, configGlobal, clientAccounts })]
-        );
+        await databaseWriteQueue;
       } catch (err) {
         console.error("Error guardando PostgreSQL:", err.message);
       }
     }, 250);
   }
+}
+
+function campoConfiguracion(d) {
+  return d.tipo === "gachapon" ? "configuracionGachapon" : d.tipo === "vending" ? "configuracionVending" : "configuracionServicio";
+}
+
+async function guardarConfiguracionEquipo(deviceId, candidate, { expectedRevision, operational = {} } = {}) {
+  const id = String(deviceId).trim().toUpperCase();
+  const copy = JSON.parse(JSON.stringify(candidate));
+  return configStore.enqueue(id, async () => {
+    const d = asegurarDevice(id);
+    const currentRevision = Number(d.configRevision || 0);
+    if (expectedRevision !== undefined && String(expectedRevision) !== String(currentRevision)) {
+      throw configError("La configuración cambió desde otra sesión. Volvé a cargarla antes de guardar.", 409);
+    }
+    const field = campoConfiguracion(d);
+    const flags = Object.fromEntries(["activo", "modoMantenimiento"].filter(key => typeof operational[key] === "boolean").map(key => [key, operational[key]]));
+    const payload = { tipo: d.tipo, [field]: copy, activo: flags.activo ?? d.activo, modoMantenimiento: flags.modoMantenimiento ?? d.modoMantenimiento };
+    if (!configStore.pool) {
+      configStore.saveLocal = (value, revision) => writeJsonAtomic(DATA_FILE, {
+        devices: { ...devices, [id]: { ...d, ...value, configRevision: revision } },
+        pagosCreados, usageEvents, configGlobal, clientAccounts
+      });
+    }
+    let revision;
+    try { revision = await configStore.save(id, payload, currentRevision); }
+    catch (error) {
+      if (error.status === 409) {
+        try {
+          const result = await configStore.pool.query("SELECT revision, payload FROM evetec_device_config WHERE device_id = $1", [id]);
+          if (result.rows[0]) Object.assign(asegurarDevice(id), result.rows[0].payload, { configRevision: Number(result.rows[0].revision) });
+        } catch (_) {}
+        throw error;
+      }
+      console.error("Error persistiendo configuración del equipo:", error.message);
+      throw configError("No se pudo confirmar el guardado en la base de datos. Intentá nuevamente.");
+    }
+    // Publicar al dispositivo solo después de confirmar la escritura.
+    const target = asegurarDevice(id);
+    Object.assign(target, payload, { configRevision: revision });
+    guardarDatos();
+    return revision;
+  });
 }
 
 async function guardarCuentaClienteDb(account, originalUsername = "") {
@@ -791,7 +836,8 @@ async function iniciarPersistencia() {
     return;
   }
   try {
-    databasePool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    databasePool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 10000, query_timeout: 15000, max: 5 });
+    databasePool.on("error", error => console.error("Conexión PostgreSQL interrumpida:", error.message));
     await databasePool.query(`CREATE TABLE IF NOT EXISTS evetec_state (
       id TEXT PRIMARY KEY,
       payload JSONB NOT NULL,
@@ -833,6 +879,19 @@ async function iniciarPersistencia() {
         );
       }
     }
+    const persistentConfig = new DeviceConfigStore({ pool: databasePool, persistentRequired: true });
+    await persistentConfig.initialize();
+    for (const row of await persistentConfig.load()) {
+      const id = String(row.device_id).toUpperCase();
+      const payload = row.payload || {};
+      if (!devices[id] && ["basic", "gachapon", "premium", "arcade", "vending"].includes(payload.tipo)) devices[id] = nuevoDevice(payload.tipo);
+      const d = asegurarDevice(id);
+      const field = campoConfiguracion(d);
+      if (payload[field] && typeof payload[field] === "object") d[field] = payload[field];
+      for (const key of ["activo", "modoMantenimiento"]) if (typeof payload[key] === "boolean") d[key] = payload[key];
+      d.configRevision = Number(row.revision);
+    }
+    configStore = persistentConfig;
     databaseReady = true;
     guardarDatos();
   } catch (err) {
@@ -1376,6 +1435,7 @@ function normalizarPedidoPago(body) {
 // =====================================================
 
 app.get("/config/:deviceId", (req, res) => {
+  res.set("Cache-Control", "no-store");
   const deviceId = String(req.params.deviceId || "ASPIRADORA_001").toUpperCase();
   const d = asegurarDevice(deviceId);
 
@@ -1395,7 +1455,7 @@ app.get("/config/:deviceId", (req, res) => {
       activo: operativo.ok,
       motivo: operativo.motivo,
       mantenimiento: Boolean(d.modoMantenimiento),
-      mensaje: operativo.ok ? (g.mensaje || configGlobal.mensajeGlobal) : operativo.mensaje,
+      mensaje: operativo.ok ? (g.mensaje ?? configGlobal.mensajeGlobal) : operativo.mensaje,
       nombre: g.nombre || "Gachapon",
       titulo: g.titulo || "GACHAPON",
       instruccion: g.instruccion || "Toca una opcion",
@@ -1447,12 +1507,12 @@ app.get("/config/:deviceId", (req, res) => {
       tipo: "basic",
       activo: operativo.ok,
       motivo: operativo.motivo,
-      mensaje: operativo.ok ? configGlobal.mensajeGlobal : operativo.mensaje,
+      mensaje: operativo.ok ? (cfg.mensaje ?? configGlobal.mensajeGlobal) : operativo.mensaje,
       precio: Number(cfg.monto),
       monto: Number(cfg.monto),
       segundos: Number(cfg.segundos),
       preinicio_habilitado: cfg.preinicioHabilitado !== false,
-      preinicio_segundos: Number(cfg.preinicioSegundos || 15),
+      preinicio_segundos: Number(cfg.preinicioSegundos ?? 15),
       nombre: cfg.nombre,
       descripcion: cfg.descripcion,
       ownerLinked: cuentaExternaLista(d),
@@ -3015,7 +3075,36 @@ app.get("/cliente", (req, res) => {
   const events = eventosUsoDevice(id).slice(-30).reverse();
   const tabs = allowedIds.map(deviceId => `<a class="tab ${deviceId === id ? "active" : ""}" href="/cliente?device=${encodeURIComponent(deviceId)}"><i class="${devices[deviceId].online ? "on" : ""}"></i><span>${escaparHtml(nombreVisibleDevice(deviceId) || deviceId)}</span><small>${escaparHtml(deviceId)}</small></a>`).join("");
   const participantCards = live.participants.map(p => `<div class="card stat"><span>${escaparHtml(p.nombre)} · ${p.porcentaje.toLocaleString("es-AR", {maximumFractionDigits:2})}%</span><b data-participant="${escaparHtml(p.id)}">$${formatoDinero(p.total)}</b><small>neto acumulado, comisión MP proporcional</small></div>`).join("");
-  const configForm = d.tipo === "vending" ? renderProductosVendingCliente(id, cfg, req.clientCsrf) : d.tipo === "gachapon" ? `<h2>Precios y tiempo</h2><p class="muted">El modo de funcionamiento y la cantidad de opciones los administra EVETEC.</p><form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><div class="grid"><label>Segundos por jugada<input name="segundosPorJugada" type="number" min="1" max="600" step="1" value="${Number(cfg.segundos_por_jugada || 30)}" required></label>${cfg.planes.slice(0, Number(cfg.cantidad_opciones || 3)).map((plan,index)=>`<label>Precio · ${index+1} jugada${index ? "s" : ""}<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(plan.monto)}" required></label>`).join("")}</div><button>Guardar precios y tiempo</button></form>` : `<h2>Precio y duración</h2><form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><div class="grid"><label>Precio (ARS)<input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></label><label>Minutos<input name="minutos" type="number" min="0" max="60" value="${Math.floor(Number(cfg.segundos)/60)}" required></label><label>Segundos<input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos)%60}" required></label></div><button>Guardar precio y duración</button></form>`;
+  const configRevisionField = `<input type="hidden" name="configRevision" value="${Number(d.configRevision || 0)}">`;
+  const savedNotice = req.query.saved === "1" ? `<p role="status" style="color:var(--green)">Cambios guardados correctamente. El equipo los recibirá cuando esté conectado.</p>` : "";
+  const configForm = d.tipo === "vending" ? renderProductosVendingCliente(id, cfg, req.clientCsrf) : `${savedNotice}${d.tipo === "gachapon" ? `
+    <h2>Precios, tiempo y textos</h2>
+    <p class="muted">Podés personalizar este equipo. El reparto y la cuenta de cobro los administra EVETEC.</p>
+    <form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update">
+      <input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}">${configRevisionField}
+      <div class="grid">
+        <label style="grid-column:1/-1">Texto principal del equipo<input name="nombre" maxlength="60" value="${escaparHtml(cfg.nombre)}" required></label>
+        <label style="grid-column:1/-1">Título en pantalla<input name="titulo" maxlength="40" value="${escaparHtml(cfg.titulo ?? "")}"></label>
+        <label style="grid-column:1/-1">Mensaje<input name="mensaje" maxlength="100" value="${escaparHtml(cfg.mensaje ?? "")}"></label>
+        <label>Segundos por jugada<input name="segundosPorJugada" type="number" min="1" max="600" step="1" value="${Number(cfg.segundos_por_jugada ?? 30)}" required></label>
+        ${cfg.planes.slice(0, Number(cfg.cantidad_opciones || 3)).map((plan,index)=>`<label>Precio · ${index+1} jugada${index ? "s" : ""}<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(plan.monto)}" required></label>`).join("")}
+      </div>
+      <button>Guardar cambios</button>
+    </form>` : `
+    <h2>Precio, duración y textos</h2>
+    <p class="muted">Podés personalizar este equipo. El reparto y la cuenta de cobro los administra EVETEC.</p>
+    <form method="POST" action="/cliente/device/${encodeURIComponent(id)}/update">
+      <input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}">${configRevisionField}
+      <div class="grid">
+        <label style="grid-column:1/-1">Texto principal del equipo<input name="nombre" maxlength="60" value="${escaparHtml(cfg.nombre)}" required></label>
+        <label style="grid-column:1/-1">Descripción<input name="descripcion" maxlength="120" value="${escaparHtml(cfg.descripcion ?? "")}"></label>
+        <label style="grid-column:1/-1">Mensaje<input name="mensaje" maxlength="100" value="${escaparHtml(cfg.mensaje ?? "")}"></label>
+        <label>Precio (ARS)<input name="monto" type="number" min="1" step="0.01" value="${Number(cfg.monto)}" required></label>
+        <label>Minutos<input name="minutos" type="number" min="0" max="60" step="1" value="${Math.floor(Number(cfg.segundos)/60)}" required></label>
+        <label>Segundos<input name="segundosServicio" type="number" min="0" max="59" step="1" value="${Number(cfg.segundos)%60}" required></label>
+      </div>
+      <button>Guardar cambios</button>
+    </form>`}`;
   const rows = events.map(e => `<tr><td>${e.approved_epoch ? new Date(Number(e.approved_epoch)*1000).toLocaleString("es-AR") : "-"}</td><td>$${formatoDinero(Number(e.amount_cents||0)/100)}</td><td>$${formatoDinero(Number(e.mp_fee_cents||0)/100)}</td><td>${formatoTiempo(e.sold_seconds)}</td><td>${formatoTiempo(e.actual_seconds)}</td><td>${e.completed === false ? "Interrumpido" : "Completado"}</td></tr>`).join("");
   res.set("Cache-Control", "no-store");
   res.send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escaparHtml(cfg.nombre)} · EVETEC</title><style>:root{--bg:#06111e;--panel:#0d1d2c;--line:#29445c;--cyan:#35d5e4;--muted:#9bb1c4;--green:#31d17c;--yellow:#ffc84b}*{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#071522,#04101b);color:#edf8ff;font-family:system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1220px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin:18px 0}.brand{color:var(--cyan);font-size:12px;font-weight:900;letter-spacing:.16em}h1{margin:4px 0;font-size:clamp(26px,4vw,42px)}h2{margin-top:0}.muted,small{color:var(--muted)}.status{padding:10px 14px;border:1px solid var(--line);border-radius:999px;font-weight:800}.status i,.tab i{display:inline-block;width:9px;height:9px;border-radius:50%;background:#e95064;margin-right:7px}.status i.on,.tab i.on{background:var(--green);box-shadow:0 0 10px var(--green)}.tabs{display:flex;gap:9px;overflow:auto}.tab{min-width:190px;padding:12px;border:1px solid var(--line);border-radius:13px;color:white;text-decoration:none;display:grid;grid-template-columns:14px 1fr}.tab small{grid-column:2}.tab.active{border-color:var(--cyan);background:#113047}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin:18px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:20px}.stat span{display:block;color:#a9c2d6;text-transform:uppercase;font-size:11px;font-weight:850;letter-spacing:.07em}.stat b{font-size:28px;display:block;margin:8px 0}.columns{display:grid;grid-template-columns:1.2fr .8fr;gap:14px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}label{display:grid;gap:7px;color:#a9c2d6;font-size:12px;text-transform:uppercase;font-weight:800}input{padding:12px;border-radius:10px;border:1px solid #35516a;background:#071522;color:white;font-size:17px}button{border:0;border-radius:10px;padding:12px 16px;background:var(--cyan);color:#03202a;font-weight:900;cursor:pointer;margin-top:14px}.readonly{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line);padding:10px 0}.table{overflow:auto;margin-top:14px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted);font-size:11px;text-transform:uppercase}.logout{background:transparent;color:#bcd0df;border:1px solid var(--line);margin:0}@media(max-width:850px){.stats{grid-template-columns:repeat(2,1fr)}.columns{grid-template-columns:1fr}}@media(max-width:560px){main{padding:14px}.top{align-items:flex-start}.grid{grid-template-columns:1fr}.stats{gap:8px}.card{padding:15px}}</style></head><body><main><div class="tabs">${tabs}</div><header class="top"><div><div class="brand">EVETEC · PORTAL DEL CLIENTE</div><h1>${escaparHtml(cfg.nombre)}</h1><div class="muted">${escaparHtml(req.clientAccount.displayName)} · ${escaparHtml(id)}</div></div><form method="POST" action="/cliente/logout"><input type="hidden" name="csrf" value="${escaparHtml(req.clientCsrf)}"><button class="logout">Salir</button></form></header><div class="status"><i id="online-dot" class="${live.online ? "on" : ""}"></i><span id="online-label">${live.online ? "Equipo online" : "Equipo offline"}</span></div><section class="stats"><div class="card stat"><span>Recaudado</span><b id="total">$${formatoDinero(live.totalRecaudado)}</b></div><div class="card stat"><span>Pagos aprobados</span><b id="payments">${live.pagosAprobados}</b></div><div class="card stat"><span>Tiempo vendido</span><b id="sold">${formatoTiempo(live.segundosVendidos)}</b></div><div class="card stat"><span>Uso real</span><b id="used">${formatoTiempo(live.tiempoMotor)}</b></div>${participantCards}<div class="card stat"><span>Comisión MP real</span><b id="fees">$${formatoDinero(live.comisionesMp)}</b></div><div class="card stat"><span>Tasa efectiva MP</span><b id="rate">${live.tasaMpEfectiva.toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2})}%</b></div><div class="card stat"><span>Neto tras MP</span><b id="net">$${formatoDinero(live.netoDespuesMp)}</b></div></section><section class="columns"><div class="card">${configForm}</div><aside class="card"><h2>Estado del equipo</h2><div class="readonly"><span>Última conexión</span><b id="last-seen">${live.ultimaConexion ? new Date(live.ultimaConexion).toLocaleString("es-AR") : "Nunca"}</b></div><div class="readonly"><span>Firmware</span><b>${escaparHtml(live.firmware)}</b></div><div class="readonly"><span>WiFi / señal</span><b>${escaparHtml(live.ssid)} ${live.rssi ? `(${live.rssi} dBm)` : ""}</b></div><div class="readonly"><span>Reparto</span><b>Solo lectura</b></div><p class="muted">Los porcentajes, vinculaciones y la cuenta receptora son administrados por EVETEC. Las cifras reflejan los pagos confirmados y sincronizados.</p></aside></section><section class="card" style="margin-top:14px"><h2>Servicios confirmados</h2><div class="table"><table><thead><tr><th>Fecha</th><th>Monto</th><th>Comisión MP</th><th>Vendido</th><th>Uso real</th><th>Estado</th></tr></thead><tbody>${rows || `<tr><td colspan="6">Todavía no hay servicios registrados.</td></tr>`}</tbody></table></div></section><script>const money=n=>'$'+Number(n||0).toLocaleString('es-AR',{maximumFractionDigits:2});const time=n=>{n=Number(n||0);const h=Math.floor(n/3600),m=Math.floor(n%3600/60),s=n%60;return h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'};async function refresh(){try{const r=await fetch('/cliente/device/${encodeURIComponent(id)}/live-stats',{cache:'no-store'});if(!r.ok)return;const x=await r.json();document.getElementById('online-dot').classList.toggle('on',x.online);document.getElementById('online-label').textContent=x.online?'Equipo online':'Equipo offline';document.getElementById('total').textContent=money(x.totalRecaudado);document.getElementById('payments').textContent=x.pagosAprobados;document.getElementById('sold').textContent=time(x.segundosVendidos);document.getElementById('used').textContent=time(x.tiempoMotor);document.getElementById('fees').textContent=money(x.comisionesMp);document.getElementById('net').textContent=money(x.netoDespuesMp);document.getElementById('rate').textContent=Number(x.tasaMpEfectiva).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';document.getElementById('last-seen').textContent=x.ultimaConexion?new Date(x.ultimaConexion).toLocaleString('es-AR'):'Nunca';document.querySelectorAll('[data-participant]').forEach(el=>el.textContent=money(x.participantTotals[el.dataset.participant]||0))}catch(_){}}setInterval(refresh,5000)</script></main></body></html>`);
@@ -3071,40 +3160,84 @@ app.put("/cliente/device/:deviceId/vending-availability/:slot", verificarCsrfCli
   res.json({ ok: true, slot, enabled: product.activo, version: d.configuracionVending.version });
 });
 
-app.post("/cliente/device/:deviceId/update", verificarCsrfCliente, (req, res) => {
+app.post("/cliente/device/:deviceId/update", verificarCsrfCliente, async (req, res) => {
   const id = String(req.params.deviceId || "").trim().toUpperCase();
   if (!req.clientAccount.deviceIds.includes(id) || !devices[id]) return res.status(403).send("Equipo no autorizado.");
-  const d = asegurarDevice(id);
-  if (d.tipo === "vending") {
-    const cfg = d.configuracionVending;
-    cfg.productos.forEach((product, index) => {
-      product.nombre = String(req.body[`name_${index}`] || product.nombre).trim().slice(0, 40) || product.nombre;
-      const amount = Number(req.body[`price_${index}`]);
-      const stock = Number(req.body[`stock_${index}`]);
-      if (Number.isFinite(amount) && amount > 0) product.monto = Math.round(amount * 100) / 100;
-      if (Number.isFinite(stock)) product.stock = Math.max(0, Math.floor(stock));
-      product.activo = product.stock > 0 && req.body[`enabled_${index}`] === "on";
-      // Physical code and productId are intentionally never read from this form.
-    });
-    cfg.version = Number(cfg.version || 0) + 1;
-  } else if (d.tipo === "gachapon") {
-    const cfg = configuracionGachaponDevice(id);
-    const seconds = Number(req.body.segundosPorJugada);
-    if (Number.isFinite(seconds)) cfg.segundos_por_jugada = Math.max(1, Math.min(600, Math.round(seconds)));
-    for (let index = 0; index < Number(cfg.cantidad_opciones || 3); index++) {
-      const amount = Number(req.body[`monto${index}`]);
-      if (Number.isFinite(amount) && amount > 0) cfg.planes[index].monto = Math.round(amount * 100) / 100;
+  if (devices[id].tipo === "vending") {
+    const d = asegurarDevice(id);
+    if (d.tipo === "vending") {
+      const cfg = d.configuracionVending;
+      cfg.productos.forEach((product, index) => {
+        product.nombre = String(req.body[`name_${index}`] || product.nombre).trim().slice(0, 40) || product.nombre;
+        const amount = Number(req.body[`price_${index}`]);
+        const stock = Number(req.body[`stock_${index}`]);
+        if (Number.isFinite(amount) && amount > 0) product.monto = Math.round(amount * 100) / 100;
+        if (Number.isFinite(stock)) product.stock = Math.max(0, Math.floor(stock));
+        product.activo = product.stock > 0 && req.body[`enabled_${index}`] === "on";
+        // Physical code and productId are intentionally never read from this form.
+      });
+      cfg.version = Number(cfg.version || 0) + 1;
     }
-  } else {
-    const cfg = configuracionServicioDevice(id);
-    const amount = Number(req.body.monto);
-    const minutes = Number(req.body.minutos);
-    const seconds = Number(req.body.segundosServicio);
-    if (Number.isFinite(amount) && amount > 0) cfg.monto = Math.round(amount * 100) / 100;
-    if (Number.isFinite(minutes) && Number.isFinite(seconds)) cfg.segundos = Math.max(1, Math.min(3600, Math.round(Math.max(0, Math.min(60, minutes))) * 60 + Math.round(Math.max(0, Math.min(59, seconds)))));
+    guardarDatos();
+    return res.redirect(`/cliente?device=${encodeURIComponent(id)}`);
   }
-  guardarDatos();
-  res.redirect(`/cliente?device=${encodeURIComponent(id)}`);
+  try {
+    const d = asegurarDevice(id);
+    const invalid = message => { throw Object.assign(new Error(message), { status: 400 }); };
+    if (!["basic", "gachapon"].includes(d.tipo)) invalid("La configuración de este tipo de equipo debe realizarla EVETEC.");
+    const cfg = d.tipo === "gachapon" ? configuracionGachaponDevice(id) : configuracionServicioDevice(id);
+    const nextConfig = JSON.parse(JSON.stringify(cfg));
+    const present = field => Object.prototype.hasOwnProperty.call(req.body, field);
+    const numberField = (field, label, min, max, integer = false) => {
+      if (!present(field)) return undefined;
+      const raw = req.body[field];
+      if (!["string", "number"].includes(typeof raw) || (typeof raw === "string" && !raw.trim())) invalid(`Completá ${label}.`);
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
+        invalid(`${label} debe ser ${integer ? "un número entero" : "un número"} entre ${min} y ${max}.`);
+      }
+      return value;
+    };
+    const textField = (field, label, max, required = false) => {
+      if (!present(field)) return;
+      if (typeof req.body[field] !== "string") invalid(`${label} no es válido.`);
+      const value = req.body[field].trim();
+      if (value.length > max || (required && !value)) invalid(`${label} debe tener ${required ? "entre 1 y" : "como máximo"} ${max} caracteres.`);
+      nextConfig[field] = value;
+    };
+    // Solo se copian los campos comerciales y de texto permitidos al cliente.
+    // Destinatarios, credenciales y porcentajes nunca se toman del formulario.
+    textField("nombre", "El texto principal", 60, true);
+    textField("mensaje", "El mensaje", 100);
+    if (d.tipo === "gachapon") {
+      textField("titulo", "El título", 40);
+      const seconds = numberField("segundosPorJugada", "Los segundos por jugada", 1, 600, true);
+      if (seconds !== undefined) nextConfig.segundos_por_jugada = seconds;
+      for (let index = 0; index < Number(cfg.cantidad_opciones || 3); index++) {
+        const amount = numberField(`monto${index}`, `El precio de ${index + 1} jugada${index ? "s" : ""}`, 1, 100000000);
+        if (amount !== undefined) nextConfig.planes[index].monto = Math.round(amount * 100) / 100;
+      }
+    } else {
+      textField("descripcion", "La descripción", 120);
+      const amount = numberField("monto", "El precio", 1, 100000000);
+      if (amount !== undefined) nextConfig.monto = Math.round(amount * 100) / 100;
+      const minutes = numberField("minutos", "Los minutos", 0, 60, true);
+      const seconds = numberField("segundosServicio", "Los segundos", 0, 59, true);
+      if (minutes !== undefined || seconds !== undefined) {
+        const duration = (minutes ?? Math.floor(Number(cfg.segundos) / 60)) * 60 + (seconds ?? Number(cfg.segundos) % 60);
+        if (duration < 1 || duration > 3600) invalid("La duración total debe estar entre 1 segundo y 60 minutos.");
+        nextConfig.segundos = duration;
+      }
+    }
+    await guardarConfiguracionEquipo(id, nextConfig, { expectedRevision: req.body.configRevision });
+    res.redirect(`/cliente?device=${encodeURIComponent(id)}&saved=1`);
+  } catch (error) {
+    const requestedStatus = Number(error.status || error.statusCode);
+    const status = [400, 409, 503].includes(requestedStatus) ? requestedStatus : 503;
+    const message = [400, 409].includes(status) ? error.message : "No se pudo confirmar el guardado. Los cambios no se informarán como guardados hasta que el almacenamiento esté disponible. Intentá nuevamente.";
+    if (status === 503) console.error("No se pudo guardar la configuración del cliente:", error.message);
+    res.status(status).send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>No se guardaron los cambios · EVETEC</title></head><body style="font:17px system-ui;max-width:650px;margin:60px auto;padding:20px"><h1>No se guardaron los cambios</h1><p>${escaparHtml(message)}</p><p><a href="/cliente?device=${encodeURIComponent(id)}">Volver a cargar la configuración actual</a></p></body></html>`);
+  }
 });
 
 // =====================================================
@@ -3116,6 +3249,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/admin", (req, res) => {
+  res.set("Cache-Control", "no-store");
   const requestedId = String(req.query.device || "").trim().toUpperCase();
   const deviceIds = Object.keys(devices).sort();
   const id = requestedId && devices[requestedId] ? requestedId : (devices[PROTOTYPE_DEVICE_ID] ? PROTOTYPE_DEVICE_ID : deviceIds[0]);
@@ -3207,6 +3341,8 @@ app.get("/admin", (req, res) => {
   const serviceConfigHtml = d.tipo === "gachapon" ? `
         <h2>Configuración de la máquina de peluches</h2>
         <form method="POST" action="/admin/device/${encodeURIComponent(id)}/update">
+          <input type="hidden" name="serviceForm" value="1">
+          <input type="hidden" name="configRevision" value="${Number(d.configRevision || 0)}">
           <div class="switches">
             <label class="check"><input type="checkbox" name="activo" ${d.activo && cfg.activo ? "checked" : ""}> Equipo habilitado</label>
             <label class="check"><input type="checkbox" name="mantenimiento" ${d.modoMantenimiento ? "checked" : ""}> Modo mantenimiento</label>
@@ -3218,8 +3354,8 @@ app.get("/admin", (req, res) => {
             <div class="field"><label>Segundos encendido por jugada</label><input name="segundosPorJugada" type="number" min="1" max="600" step="1" value="${Number(cfg.segundos_por_jugada || 30)}" required></div>
             <div class="field"><label>Duración de cada pulso (ms)</label><input name="pulsoMotorMs" type="number" min="100" max="10000" step="50" value="${Number(cfg.pulso_motor_ms || 500)}" required></div>
             <div class="field"><label>Pausa entre pulsos (ms)</label><input name="pausaPremiosMs" type="number" min="0" max="10000" step="50" value="${Number(cfg.pausa_premios_ms || 650)}" required></div>
-            <div class="field"><label>Título en pantalla</label><input name="titulo" value="${escaparHtml(cfg.titulo || "ATRAPÁ TU PELUCHE")}" maxlength="40"></div>
-            <div class="field wide"><label>Mensaje</label><input name="mensaje" value="${escaparHtml(cfg.mensaje || "Elegí tus jugadas y pagá con QR")}" maxlength="100"></div>
+            <div class="field"><label>Título en pantalla</label><input name="titulo" value="${escaparHtml(cfg.titulo ?? "ATRAPÁ TU PELUCHE")}" maxlength="40"></div>
+            <div class="field wide"><label>Mensaje</label><input name="mensaje" value="${escaparHtml(cfg.mensaje ?? "Elegí tus jugadas y pagá con QR")}" maxlength="100"></div>
           </div>
           <h3>Precios por cantidad de jugadas</h3>
           <div class="plan-grid">${[0,1,2].map(index => { const p = cfg.planes[index]; return `<div class="plan-card"><b>${index + 1} jugada${index ? "s" : ""}</b><label>Precio (ARS)<input name="monto${index}" type="number" min="1" step="0.01" value="${Number(p.monto)}" required></label><label>Texto breve<input name="etiqueta${index}" value="${escaparHtml(p.etiqueta || "Elegir y pagar")}" maxlength="28"></label></div>`; }).join("")}</div>
@@ -3228,6 +3364,8 @@ app.get("/admin", (req, res) => {
         </form>` : `
         <h2>Configuración del servicio</h2>
         <form method="POST" action="/admin/device/${encodeURIComponent(id)}/update">
+          <input type="hidden" name="serviceForm" value="1">
+          <input type="hidden" name="configRevision" value="${Number(d.configRevision || 0)}">
           <div class="switches">
             <label class="check"><input type="checkbox" name="activo" ${d.activo && cfg.activo ? "checked" : ""}> Equipo habilitado</label>
             <label class="check"><input type="checkbox" name="mantenimiento" ${d.modoMantenimiento ? "checked" : ""}> Modo mantenimiento</label>
@@ -3240,6 +3378,7 @@ app.get("/admin", (req, res) => {
             <div class="field"><label>Duración: segundos</label><input name="segundosServicio" type="number" min="0" max="59" value="${Number(cfg.segundos) % 60}" required></div>
             <div class="field"><label>Espera antes de encender (segundos)</label><input name="preinicioSegundos" type="number" min="0" max="120" value="${Number(cfg.preinicioSegundos)}" required></div>
             <div class="field wide"><label>Descripción</label><input name="descripcion" value="${escaparHtml(cfg.descripcion)}" maxlength="120"></div>
+            <div class="field wide"><label>Mensaje</label><input name="mensaje" value="${escaparHtml(cfg.mensaje ?? "")}" maxlength="100"></div>
           </div>
           <div class="actions"><button class="btn primary" type="submit">Guardar cambios</button></div>
         </form>`;
@@ -3318,6 +3457,7 @@ app.get("/admin", (req, res) => {
 
     <section class="columns">
       <div class="card">
+        ${req.query.saved === "1" ? '<p role="status" style="color:var(--green)">Cambios guardados correctamente.</p>' : ""}
         ${serviceConfigHtml}
       </div>
 
@@ -4281,57 +4421,67 @@ app.post("/admin/device/:deviceId/distribution-update", (req, res) => {
   res.redirect(adminDeviceUrl(id));
 });
 
-app.post("/admin/device/:deviceId/update", (req, res) => {
-  const id = String(req.params.deviceId || "").trim().toUpperCase();
-  const d = asegurarDevice(id);
-  if (d.tipo === "gachapon") {
-    const cfg = configuracionGachaponDevice(id);
-    const activo = req.body.activo === "on";
-    d.activo = activo;
-    d.modoMantenimiento = req.body.mantenimiento === "on";
-    cfg.activo = activo;
-    cfg.nombre = String(req.body.nombre || cfg.nombre).trim().slice(0, 60);
-    cfg.titulo = String(req.body.titulo || cfg.titulo).trim().slice(0, 40);
-    cfg.mensaje = String(req.body.mensaje || cfg.mensaje).trim().slice(0, 100);
-    cfg.cantidad_opciones = Math.max(1, Math.min(3, Number(req.body.cantidadOpciones || 1)));
-    cfg.modo_activacion = req.body.modoActivacion === "pulsos" ? "pulsos" : "tiempo";
-    cfg.segundos_por_jugada = Math.max(1, Math.min(600, Number(req.body.segundosPorJugada || 30)));
-    cfg.pulso_motor_ms = Math.max(100, Math.min(10000, Number(req.body.pulsoMotorMs || 500)));
-    cfg.pausa_premios_ms = Math.max(0, Math.min(10000, Number(req.body.pausaPremiosMs || 650)));
-    for (let index = 0; index < 3; index++) {
-      const monto = Number(req.body[`monto${index}`]);
-      const plan = cfg.planes[index];
-      plan.id = `G${index + 1}`;
-      plan.creditos = index + 1;
-      plan.nombre = `${index + 1} JUGADA${index ? "S" : ""}`;
-      plan.descripcion = `${index + 1} jugada${index ? "s" : ""}`;
-      plan.giro_ms = cfg.pulso_motor_ms;
-      if (Number.isFinite(monto) && monto > 0) plan.monto = Math.round(monto * 100) / 100;
-      plan.etiqueta = String(req.body[`etiqueta${index}`] || "Elegir y pagar").trim().slice(0, 28);
+async function actualizarConfiguracionAdmin(req, res, deviceId) {
+  const id = String(deviceId || "").trim().toUpperCase();
+  try {
+    if (!devices[id]) return res.status(404).send("Equipo no encontrado.");
+    const d = asegurarDevice(id);
+    if (!["basic", "gachapon"].includes(d.tipo)) throw configError("Usá el apartado de configuración de este tipo de equipo.", 400);
+    const cfg = JSON.parse(JSON.stringify(d[campoConfiguracion(d)]));
+    const present = key => Object.prototype.hasOwnProperty.call(req.body, key);
+    const number = (key, min, max, integer = true) => {
+      if (!present(key)) return undefined;
+      const raw = req.body[key], value = Number(raw);
+      if (typeof raw !== "string" || !raw.trim() || !Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) throw configError(`El campo ${key} debe tener un valor entre ${min} y ${max}.`, 400);
+      return value;
+    };
+    for (const [key, limit] of [["nombre",60],["descripcion",120],["mensaje",100],["titulo",40]]) {
+      if (!present(key)) continue;
+      if (typeof req.body[key] !== "string" || req.body[key].trim().length > limit || (key === "nombre" && !req.body[key].trim())) throw configError(`Revisá el texto de ${key}.`, 400);
+      cfg[key] = req.body[key].trim();
     }
-    guardarDatos();
-    return res.redirect(adminDeviceUrl(id));
+    const operational = {};
+    for (const [input, key] of [["activo","activo"],["mantenimiento","modoMantenimiento"]]) {
+      if (req.body.serviceForm === "1" || present(input)) operational[key] = req.body[input] === "on";
+    }
+    if (typeof operational.activo === "boolean") cfg.activo = operational.activo;
+    if (d.tipo === "gachapon") {
+      for (const [input, key, min, max] of [["cantidadOpciones","cantidad_opciones",1,3],["segundosPorJugada","segundos_por_jugada",1,600],["pulsoMotorMs","pulso_motor_ms",100,10000],["pausaPremiosMs","pausa_premios_ms",0,10000]]) {
+        const value = number(input,min,max); if (value !== undefined) cfg[key] = value;
+      }
+      if (present("modoActivacion")) {
+        if (!["tiempo","pulsos"].includes(req.body.modoActivacion)) throw configError("Modo de activación inválido.",400);
+        cfg.modo_activacion = req.body.modoActivacion;
+      }
+      cfg.planes.forEach((plan,index) => {
+        const amount = number(`monto${index}`,1,100000000,false);
+        if (amount !== undefined) plan.monto = Math.round(amount*100)/100;
+        if (present(`etiqueta${index}`)) plan.etiqueta = String(req.body[`etiqueta${index}`]).trim().slice(0,28);
+        plan.giro_ms = cfg.pulso_motor_ms;
+      });
+    } else {
+      const amount = number("monto",1,100000000,false);
+      if (amount !== undefined) cfg.monto = Math.round(amount*100)/100;
+      const minutes = number("minutos",0,60), seconds = number("segundosServicio",0,59);
+      const legacySeconds = number("segundos",1,3600);
+      if (minutes !== undefined || seconds !== undefined) {
+        const duration = (minutes ?? Math.floor(cfg.segundos/60))*60 + (seconds ?? cfg.segundos%60);
+        if (duration < 1 || duration > 3600) throw configError("La duración debe estar entre 1 segundo y 60 minutos.",400);
+        cfg.segundos = duration;
+      } else if (legacySeconds !== undefined) cfg.segundos = legacySeconds;
+      const wait = number("preinicioSegundos",0,120);
+      if (wait !== undefined) cfg.preinicioSegundos = wait;
+      if (req.body.serviceForm === "1" || present("preinicioHabilitado") || present("preinicioSegundos")) cfg.preinicioHabilitado = req.body.preinicioHabilitado === "on";
+    }
+    await guardarConfiguracionEquipo(id, cfg, { expectedRevision: req.body.configRevision, operational });
+    res.redirect(adminDeviceUrl(id, "&saved=1"));
+  } catch (error) {
+    const status = [400,409].includes(error.status) ? error.status : 503;
+    res.status(status).send(`<h1>No se guardaron los cambios</h1><p>${escaparHtml(error.message)}</p><a href="${adminDeviceUrl(id)}">Volver a la configuración</a>`);
   }
-  const cfg = configuracionServicioDevice(id);
-  const activo = req.body.activo === "on";
-  const monto = Number(req.body.monto);
-  const minutos = Number(req.body.minutos);
-  const segundos = Number(req.body.segundosServicio);
-  const preinicio = Number(req.body.preinicioSegundos);
-  d.activo = activo;
-  d.modoMantenimiento = req.body.mantenimiento === "on";
-  cfg.activo = activo;
-  cfg.preinicioHabilitado = req.body.preinicioHabilitado === "on";
-  cfg.nombre = String(req.body.nombre || cfg.nombre).trim().slice(0, 60);
-  cfg.descripcion = String(req.body.descripcion || cfg.descripcion).trim().slice(0, 120);
-  if (Number.isFinite(monto) && monto > 0) cfg.monto = Math.round(monto * 100) / 100;
-  if (Number.isFinite(minutos) && Number.isFinite(segundos)) {
-    cfg.segundos = Math.max(1, Math.min(3600, Math.round(Math.max(0, Math.min(60, minutos))) * 60 + Math.round(Math.max(0, Math.min(59, segundos)))));
-  }
-  if (Number.isFinite(preinicio)) cfg.preinicioSegundos = Math.max(0, Math.min(120, Math.round(preinicio)));
-  guardarDatos();
-  res.redirect(adminDeviceUrl(id));
-});
+}
+
+app.post("/admin/device/:deviceId/update", (req, res) => actualizarConfiguracionAdmin(req, res, req.params.deviceId));
 
 app.get("/admin/prototype/usage-backup.csv", (req, res) => {
   const events = eventosUsoDevice(PROTOTYPE_DEVICE_ID);
@@ -4416,46 +4566,7 @@ app.post("/admin/prototype/distribution-update", (req, res) => {
   res.redirect("/admin");
 });
 
-app.post("/admin/prototype/update", (req, res) => {
-  const d = asegurarDevice(PROTOTYPE_DEVICE_ID);
-  const cfg = configuracionServicioDevice(PROTOTYPE_DEVICE_ID);
-  const activo = req.body.activo === "on";
-  const modo = String(req.body.modoCobro || "owner_commission");
-  const monto = Number(req.body.monto);
-  const minutosServicio = Number(req.body.minutos);
-  const segundosServicio = Number(req.body.segundosServicio);
-  const segundosAnteriores = Number(req.body.segundos);
-  const preinicio = Number(req.body.preinicioSegundos);
-  const comision = Number(req.body.comision);
-
-  configGlobal.activo = activo;
-  cfg.activo = activo;
-  d.activo = activo;
-  d.modoMantenimiento = req.body.mantenimiento === "on";
-  cfg.preinicioHabilitado = req.body.preinicioHabilitado === "on";
-  cfg.nombre = String(req.body.nombre || cfg.nombre).trim().slice(0, 60);
-  cfg.descripcion = String(req.body.descripcion || cfg.descripcion).trim().slice(0, 120);
-
-  if (Number.isFinite(monto) && monto > 0) cfg.monto = Math.round(monto * 100) / 100;
-  if (Number.isFinite(minutosServicio) && Number.isFinite(segundosServicio)) {
-    const minutosValidos = Math.max(0, Math.min(60, Math.round(minutosServicio)));
-    const segundosValidos = Math.max(0, Math.min(59, Math.round(segundosServicio)));
-    const duracionTotal = minutosValidos * 60 + segundosValidos;
-    cfg.segundos = Math.max(1, Math.min(3600, duracionTotal));
-  } else if (Number.isFinite(segundosAnteriores)) {
-    // Compatibilidad con formularios o integraciones anteriores.
-    cfg.segundos = Math.max(1, Math.min(3600, Math.round(segundosAnteriores)));
-  }
-  if (Number.isFinite(preinicio)) cfg.preinicioSegundos = Math.max(0, Math.min(120, Math.round(preinicio)));
-  if (Number.isFinite(comision)) d.comisionEvetecPorcentaje = Math.max(0, Math.min(100, comision));
-
-  d.modoCobro = ["owner_commission", "owner_direct", "evetec"].includes(modo)
-    ? modo
-    : "owner_commission";
-
-  guardarDatos();
-  res.redirect("/admin");
-});
+app.post("/admin/prototype/update", (req, res) => actualizarConfiguracionAdmin(req, res, PROTOTYPE_DEVICE_ID));
 
 app.post("/admin/global/update", (req, res) => {
   configGlobal.activo = req.body.activo === "on";
@@ -4465,18 +4576,7 @@ app.post("/admin/global/update", (req, res) => {
   res.redirect("/admin");
 });
 
-app.post("/admin/basic/update", (req, res) => {
-  const cfg = configuracionServicioDevice(PROTOTYPE_DEVICE_ID);
-  cfg.activo = req.body.activo === "on";
-  cfg.nombre = req.body.nombre || cfg.nombre;
-  cfg.monto = Number(req.body.monto) || cfg.monto;
-  cfg.segundos = Math.max(1, Math.min(3600, Number(req.body.segundos) || cfg.segundos));
-  cfg.preinicioSegundos = Math.max(0, Math.min(120, Number(req.body.preinicioSegundos) || 0));
-  cfg.descripcion = req.body.descripcion || cfg.descripcion;
-  cfg.montoBase = cfg.montoBase || cfg.monto;
-  guardarDatos();
-  res.redirect("/admin");
-});
+app.post("/admin/basic/update", (req, res) => actualizarConfiguracionAdmin(req, res, PROTOTYPE_DEVICE_ID));
 
 function actualizarArrayPlanes(arr, body, prefijo) {
   for (let i = 0; i < 3; i++) {
@@ -4636,20 +4736,30 @@ app.post("/admin/device/add", (req, res) => {
   res.redirect(id ? adminDeviceUrl(id) : "/admin");
 });
 
-app.post("/admin/device/:deviceId/status", (req, res) => {
+app.post("/admin/device/:deviceId/status", async (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
-  d.activo = req.body.activo === "1";
-  if (d.activo) d.modoMantenimiento = false;
-  guardarDatos();
-  res.redirect("/admin");
+  const active = req.body.activo === "1";
+  if (!["basic", "gachapon"].includes(d.tipo)) {
+    d.activo = active; if (active) d.modoMantenimiento = false;
+    guardarDatos(); return res.redirect("/admin");
+  }
+  try {
+    await guardarConfiguracionEquipo(req.params.deviceId, d[campoConfiguracion(d)], { operational: { activo: active, modoMantenimiento: active ? false : d.modoMantenimiento } });
+    res.redirect("/admin");
+  } catch (error) { res.status(error.status || 503).send(escaparHtml(error.message)); }
 });
 
-app.post("/admin/device/:deviceId/maintenance", (req, res) => {
+app.post("/admin/device/:deviceId/maintenance", async (req, res) => {
   const d = asegurarDevice(req.params.deviceId);
-  d.modoMantenimiento = req.body.mantenimiento === "1";
-  if (d.modoMantenimiento) d.activo = false;
-  guardarDatos();
-  res.redirect("/admin");
+  const maintenance = req.body.mantenimiento === "1";
+  if (!["basic", "gachapon"].includes(d.tipo)) {
+    d.modoMantenimiento = maintenance; if (maintenance) d.activo = false;
+    guardarDatos(); return res.redirect("/admin");
+  }
+  try {
+    await guardarConfiguracionEquipo(req.params.deviceId, d[campoConfiguracion(d)], { operational: { modoMantenimiento: maintenance, activo: maintenance ? false : d.activo } });
+    res.redirect("/admin");
+  } catch (error) { res.status(error.status || 503).send(escaparHtml(error.message)); }
 });
 
 app.post("/admin/device/:deviceId/commission", (req, res) => {
@@ -4708,6 +4818,7 @@ app.get("/health", (req, res) => {
     adminProtected: Boolean(ADMIN_PASSWORD),
     deviceApiProtected: Boolean(DEVICE_API_KEY),
     persistence: databaseReady ? "postgresql" : "local-file-ephemeral",
+    configurationPersistence: configStore.pool ? "postgresql-confirmed" : (configStore.persistentRequired ? "unavailable" : "local-file"),
     databaseConfigured: Boolean(DATABASE_URL),
     devices: deviceSummary
   });

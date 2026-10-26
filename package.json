@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node server.js",
     "test:duration": "node scripts/test-duration-fields.mjs",
+    "test:service-config": "node scripts/test-service-config.mjs",
     "test:vending": "node scripts/test-vending.mjs"
   },
   "dependencies": {
